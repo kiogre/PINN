@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from Equi_module.new_layer import AB_Block
 
-class AffineNet(nn.Module):
+class AB2Net(nn.Module):
 
     def __init__(
         self,
