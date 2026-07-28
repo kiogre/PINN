@@ -31,7 +31,12 @@ class AB2Net(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
+        m1 = x[:, 0:1]
+        m2 = x[:, 5:6]
+
         for module in self.network_modules:
             x = module(x)
+
+        x = torch.cat([m1, x[:, :4], m2, x[:, 4:]], dim=1)
 
         return x
