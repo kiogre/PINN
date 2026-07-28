@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from networks import AB2Net
 import random
 from tqdm import tqdm
+from scipy.integrate import solve_ivp
 
 '''
 L'output della rete adesso è m_1, p_1 vettore, q_1 vettore e avanti così
@@ -46,7 +47,7 @@ def physics_loss_2_body(input, output, dt, G=1.0, eps=1e-3):
     ax1_p, ay1_p = accel(x1_p, y1_p, x2_p, y2_p, m2)
     ax2_p, ay2_p = accel(x2_p, y2_p, x1_p, y1_p, m1)
 
-    # v(t+dt/2), usata solo internamente per il residuo di posizione
+    # v(t+dt/2), usata solo internamente per il residuo di posizione (velocity Verlet)
     vx1_half = vx1_p + 0.5 * ax1_p * dt
     vy1_half = vy1_p + 0.5 * ay1_p * dt
     vx2_half = vx2_p + 0.5 * ax2_p * dt
@@ -92,18 +93,24 @@ def compute_angular_momentum(states):
 
 
 def conservation_loss(input, output, G=1.0, eps=1e-3):
-    """Penalise energy and angular-momentum drift between input state and output state."""
+    """Penalise RELATIVE energy and angular-momentum drift between input state and output state.
+
+    Usiamo il drift relativo (rispetto a |E0|, |L0|) invece che assoluto: con masse/velocità
+    che variano di batch in batch, il drift assoluto puo' avere scale molto diverse da p_loss
+    e dominare il gradiente in modo instabile. Il drift relativo resta O(1) indipendentemente
+    dalla scala del sistema fisico campionato.
+    """
     E, E0 = compute_energy(output, G, eps), compute_energy(input, G, eps)
     L, L0 = compute_angular_momentum(output), compute_angular_momentum(input)
 
-    loss_E = torch.mean((E - E0) ** 2)
-    loss_L = torch.mean((L - L0) ** 2)
+    loss_E = torch.mean(((E - E0) / (E0.abs() + eps)) ** 2)
+    loss_L = torch.mean(((L - L0) / (L0.abs() + eps)) ** 2)
     return loss_E + loss_L
 
 
-def train(epochs: int, 
+def train(epochs: int,
           BodyNetwork: nn.Module,
-          optimizer: torch.optim.Optimizer, 
+          optimizer: torch.optim.Optimizer,
           scheduler,
           device: torch.device = torch.device('cpu'),
           batch_size: int = 256,
@@ -117,7 +124,7 @@ def train(epochs: int,
         total_t = random.randint(1, min(30, 1 + i // 50))
         optimizer.zero_grad()
 
-        c_weight = min(i/100, 1)
+        c_weight = min(i / 100, 1)
 
         total = 0
         input = generate_instance(batch_size, device)
@@ -134,6 +141,14 @@ def train(epochs: int,
 
         total /= total_t
 
+        # Controllo di sanità: se un batch produce una loss non finita (nan/inf, es. per un
+        # incontro ravvicinato tra i due corpi con r12 -> 0), saltiamo lo step invece di
+        # propagare gradienti corrotti che possono far collassare la rete per il resto del
+        # training.
+        if not torch.isfinite(total):
+            tqdm.write(f"epoch {i}: loss non finita ({total.item()}), skip step")
+            continue
+
         total.backward()
         torch.nn.utils.clip_grad_norm_(BodyNetwork.parameters(), max_norm=1.0)
         optimizer.step()
@@ -143,11 +158,6 @@ def train(epochs: int,
         pbar.set_postfix(loss=f"{total.item():.4e}", lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
     return loss_history
-
-
-def test(BodyNetwork: nn.Module,
-         device: torch.device = torch.device('cpu')):
-    pass
 
 
 def generate_instance(batch_size=256, device=torch.device('cpu'), dtype=torch.float64):
@@ -179,6 +189,7 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
     epochs = 2000
     batch_size = 256
     lr = 1e-3
+    dt = 0.05
 
     # Network initialization
     BodyNetwork = AB2Net(
@@ -194,10 +205,13 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
         lr=lr
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                           mode='min', 
-                                                           factor=0.5, 
-                                                           patience=50)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=50,
+        min_lr=1e-6  # evita che il lr collassi fino a diventare inutile su un plateau rumoroso
+    )
 
     losses = train(
         epochs,
@@ -205,27 +219,34 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
         optimizer,
         scheduler,
         device=DEVICE,
-        batch_size = batch_size
+        batch_size=batch_size,
+        dt=dt
     )
-
-    # Performance evaluation
-    test(BodyNetwork, device=DEVICE)
 
     return BodyNetwork, optimizer, scheduler, epochs, losses
 
+
 if __name__ == "__main__":
 
-    print("="*90)
+    print("=" * 90)
 
     PATH = "./PINN_savefile/save.pt"
 
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)  # fissa anche l'RNG della GPU, non solo quello CPU
+
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net, optimizer, scheduler, epoch, losses = train_network(DEVICE)
     torch.save({
-            "model":     net.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "epoch":     epoch,
-            "losses":    losses
-        }, PATH)
+        "model": net.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "losses": losses
+    }, PATH)
+
+    plt.plot(losses)
+    plt.yscale('log')
+    plt.xlabel('epoch')
+    plt.ylabel('loss')
+    plt.savefig('loss_curve.png')
