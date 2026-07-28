@@ -11,7 +11,8 @@ class AB2Net(nn.Module):
         out_features: int = 8,
         num_blocks: int = 3,
         hidden_dim: int = 256,
-        dtype: torch.dtype = torch.float
+        dtype: torch.dtype = torch.float,
+        device: torch.device = torch.device("cpu")
     ) -> None:
 
         super().__init__()
@@ -19,12 +20,14 @@ class AB2Net(nn.Module):
         self.out_features = out_features
         self.num_blocks = num_blocks
 
-        ls = [AB_Block(in_feature=self.in_features, out_feature=hidden_dim)]
+        ls = [AB_Block(in_feature=self.in_features, out_feature=hidden_dim, dtype=dtype, device=device)]
+        ls += [nn.SiLU()]
 
         for _ in range(num_blocks - 2):
-            ls += [AB_Block(hidden_dim, hidden_dim, dtype=dtype)]
+            ls += [AB_Block(hidden_dim, hidden_dim, dtype=dtype, device = device)]
+            ls += [nn.SiLU()]
 
-        ls += [nn.Linear(hidden_dim, out_features, dtype=dtype)]
+        ls += [AB_Block(hidden_dim, out_features, dtype=dtype, device = device)]
 
         self.network_modules = nn.ModuleList(ls)
 

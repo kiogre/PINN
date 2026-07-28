@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from networks import AB2Net
-from torch.utils.data import TensorDataset, random_split, DataLoader
 import random
-from math import sqrt
+from tqdm import tqdm
 
 '''
 L'output della rete adesso è m_1, p_1 vettore, q_1 vettore e avanti così
@@ -28,94 +26,79 @@ def save_checkpoint(model, optimizer, scheduler, epoch, path):
 '''
 
 
-def physics_loss_2_body(input, output, masses, G=1.0, eps=1e-3):
-    """Enforce Newton's law of gravitation for all 12 first-order ODEs."""
+def physics_loss_2_body(input, output, dt, G=1.0, eps=1e-3):
+    m1, m2 = output[:, 0], output[:, 5]
 
-    # tmp, perché abbiamo anche le masse
-    x1, y1 = output[:, 0:1], output[:, 1:2]
-    x2, y2 = output[:, 2:3], output[:, 3:4]
-    vx1, vy1 = output[:, 4:5], output[:, 5:6]
-    vx2, vy2 = output[:, 6:7], output[:, 7:8]
+    x1_p, y1_p = input[:, 1:2], input[:, 2:3]
+    vx1_p, vy1_p = input[:, 3:4], input[:, 4:5]
+    x2_p, y2_p = input[:, 6:7], input[:, 7:8]
+    vx2_p, vy2_p = input[:, 8:9], input[:, 9:10]
 
-    ones = torch.ones_like(x1)
+    x1, y1 = output[:, 1:2], output[:, 2:3]
+    vx1, vy1 = output[:, 3:4], output[:, 4:5]
+    x2, y2 = output[:, 6:7], output[:, 7:8]
+    vx2, vy2 = output[:, 8:9], output[:, 9:10]
 
-    dx1 = torch.autograd.grad(x1, input, ones, create_graph=True)[0]
-    dy1 = torch.autograd.grad(y1, input, ones, create_graph=True)[0]
-    dx2 = torch.autograd.grad(x2, input, ones, create_graph=True)[0]
-    dy2 = torch.autograd.grad(y2, input, ones, create_graph=True)[0]
-    dvx1 = torch.autograd.grad(vx1, input, ones, create_graph=True)[0]
-    dvy1 = torch.autograd.grad(vy1, input, ones, create_graph=True)[0]
-    dvx2 = torch.autograd.grad(vx2, input, ones, create_graph=True)[0]
-    dvy2 = torch.autograd.grad(vy2, input, ones, create_graph=True)[0]
+    def accel(xa, ya, xb, yb, m_other):
+        r = torch.sqrt((xb - xa) ** 2 + (yb - ya) ** 2 + eps ** 2)
+        return G * m_other * (xb - xa) / r ** 3, G * m_other * (yb - ya) / r ** 3
 
-    m1, m2 = masses
+    ax1_p, ay1_p = accel(x1_p, y1_p, x2_p, y2_p, m2)
+    ax2_p, ay2_p = accel(x2_p, y2_p, x1_p, y1_p, m1)
 
-    r12 = torch.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + eps ** 2)
+    # v(t+dt/2), usata solo internamente per il residuo di posizione
+    vx1_half = vx1_p + 0.5 * ax1_p * dt
+    vy1_half = vy1_p + 0.5 * ay1_p * dt
+    vx2_half = vx2_p + 0.5 * ax2_p * dt
+    vy2_half = vy2_p + 0.5 * ay2_p * dt
 
-    ax1 = G * m2 * (x2 - x1) / r12 ** 3
-    ay1 = G * m2 * (y2 - y1) / r12 ** 3
-    ax2 = G * m1 * (x1 - x2) / r12 ** 3
-    ay2 = G * m1 * (y1 - y2) / r12 ** 3
+    loss = (torch.mean((x1 - x1_p - vx1_half * dt) ** 2) +
+            torch.mean((y1 - y1_p - vy1_half * dt) ** 2) +
+            torch.mean((x2 - x2_p - vx2_half * dt) ** 2) +
+            torch.mean((y2 - y2_p - vy2_half * dt) ** 2))
 
-    # Kinematic residuals
-    loss = (torch.mean((dx1 - vx1) ** 2) + torch.mean((dy1 - vy1) ** 2) +
-            torch.mean((dx2 - vx2) ** 2) + torch.mean((dy2 - vy2) ** 2))
-    # Dynamic residuals
+    ax1, ay1 = accel(x1, y1, x2, y2, m2)   # forza valutata sulla posizione predetta
+    ax2, ay2 = accel(x2, y2, x1, y1, m1)
+
     loss = loss + (
-        torch.mean((dvx1 - ax1) ** 2) + torch.mean((dvy1 - ay1) ** 2) +
-        torch.mean((dvx2 - ax2) ** 2) + torch.mean((dvy2 - ay2) ** 2))
+        torch.mean((vx1 - vx1_half - 0.5 * ax1 * dt) ** 2) +
+        torch.mean((vy1 - vy1_half - 0.5 * ay1 * dt) ** 2) +
+        torch.mean((vx2 - vx2_half - 0.5 * ax2 * dt) ** 2) +
+        torch.mean((vy2 - vy2_half - 0.5 * ay2 * dt) ** 2))
     return loss
 
 
-def conservation_loss(input, output, masses, G=1.0, eps=1e-3):
-    """
-    Penalise energy and angular-momentum drift along the trajectory.
-    E(t) should equal E(0); L(t) should equal L(0).
-    """
-    '''
-    with torch.no_grad():
-        output = model(t_col)
-    states_np = output.numpy()'''
-
-    E = compute_energy(output, masses, G, eps)
-    E0 = compute_energy(input, masses, G, eps)
-    L = compute_angular_momentum(output, masses)
-    L0 = compute_angular_momentum(input, masses)
-
-    loss_E = np.mean((E - E0) ** 2)
-    loss_L = np.mean((L - L0) ** 2)
-    return torch.tensor(loss_E + loss_L, dtype=torch.float32)
-
-
-def compute_energy(states, masses, G=1.0, eps=1e-3):
-    """Total energy E = T + V.
-    DA MODIFICARE"""
-    x1, y1 = states[:, 0], states[:, 1]
-    x2, y2 = states[:, 2], states[:, 3]
-    x3, y3 = states[:, 4], states[:, 5]
-    vx1, vy1 = states[:, 6], states[:, 7]
+def compute_energy(states, G=1.0, eps=1e-3):
+    """Total energy E = T + V."""
+    m1, m2 = states[:, 0], states[:, 5]
+    x1, y1 = states[:, 1], states[:, 2]
+    x2, y2 = states[:, 6], states[:, 7]
+    vx1, vy1 = states[:, 3], states[:, 4]
     vx2, vy2 = states[:, 8], states[:, 9]
-    vx3, vy3 = states[:, 10], states[:, 11]
-    m1, m2, m3 = masses
 
-    T = (0.5 * m1 * (vx1 ** 2 + vy1 ** 2) +
-         0.5 * m2 * (vx2 ** 2 + vy2 ** 2) +
-         0.5 * m3 * (vx3 ** 2 + vy3 ** 2))
-
-    r12 = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + eps ** 2)
-    r13 = np.sqrt((x3 - x1) ** 2 + (y3 - y1) ** 2 + eps ** 2)
-    r23 = np.sqrt((x3 - x2) ** 2 + (y3 - y2) ** 2 + eps ** 2)
-
-    V = -G * (m1 * m2 / r12 + m1 * m3 / r13 + m2 * m3 / r23)
+    T = 0.5 * m1 * (vx1**2 + vy1**2) + 0.5 * m2 * (vx2**2 + vy2**2)
+    r12 = torch.sqrt((x2 - x1)**2 + (y2 - y1)**2 + eps**2)
+    V = -G * (m1 * m2 / r12)
     return T + V
+
 
 def compute_angular_momentum(states):
     """Total angular momentum L = sum m_i*(x_i*vy_i - y_i*vx_i)."""
     m1 = states[:, 0]
     m2 = states[:, 5]
-    L = (m1 * (states[:, 1] * states[:, 7] - states[:, 2] * states[:, 6]) +
-         m2 * (states[:, 3] * states[:, 9] - states[:, 4] * states[:, 8]))
+    L = (m1 * (states[:, 1] * states[:, 4] - states[:, 2] * states[:, 3]) +
+         m2 * (states[:, 6] * states[:, 9] - states[:, 7] * states[:, 8]))
     return L
+
+
+def conservation_loss(input, output, G=1.0, eps=1e-3):
+    """Penalise energy and angular-momentum drift between input state and output state."""
+    E, E0 = compute_energy(output, G, eps), compute_energy(input, G, eps)
+    L, L0 = compute_angular_momentum(output), compute_angular_momentum(input)
+
+    loss_E = torch.mean((E - E0) ** 2)
+    loss_L = torch.mean((L - L0) ** 2)
+    return loss_E + loss_L
 
 
 def train(epochs: int, 
@@ -124,22 +107,26 @@ def train(epochs: int,
           scheduler,
           device: torch.device = torch.device('cpu'),
           batch_size: int = 256,
-          c_weight: float = 1.0):
+          dt: float = 0.05):
 
     loss_history = []
     # Ricordarsi questo per l'input, altrimenti niente gradiente all'indietro: input.requires_grad_(True)
-    for i in range(epochs):
-        total_t = random.randint(1, 30)
+    pbar = tqdm(range(epochs), desc="Training")
+
+    for i in pbar:
+        total_t = random.randint(1, min(30, 1 + i // 50))
         optimizer.zero_grad()
+
+        c_weight = min(i/100, 1)
 
         total = 0
         input = generate_instance(batch_size, device)
         input.requires_grad_(True)
 
-        for _ in total_t:
+        for _ in range(total_t):
             output = BodyNetwork(input)
             # ATTENZIONE A INPUT E OUTPUT COSA CONTENGONO
-            p_loss = physics_loss_2_body(input, output)
+            p_loss = physics_loss_2_body(input, output, dt)
             c_loss = conservation_loss(input, output)
 
             total += p_loss + c_weight * c_loss
@@ -148,9 +135,12 @@ def train(epochs: int,
         total /= total_t
 
         total.backward()
+        torch.nn.utils.clip_grad_norm_(BodyNetwork.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step(total.item())
         loss_history.append(total.item())
+
+        pbar.set_postfix(loss=f"{total.item():.4e}", lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
     return loss_history
 
@@ -160,48 +150,42 @@ def test(BodyNetwork: nn.Module,
     pass
 
 
-def generate_instance(batch_size: int = 256,
-                      device: torch.device = torch.device('cpu')):
-    scale = 1000
-    batch = []
+def generate_instance(batch_size=256, device=torch.device('cpu'), dtype=torch.float64):
+    # Unità nondimensionali: masse e distanze O(1) invece di O(1000)
+    m0 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2 + 0.1   # massa in [0.1, 2.1]
+    m1 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2 + 0.1
 
-    for i in range(batch_size):
-        x_0 = [0, 0]
-        x_1 = [0, 0]
-        x_1[0] = random.random() * scale
-        q_0 = np.random.normal(size = 2) * sqrt(scale)
-        q_1 = np.random.normal(size = 2) * sqrt(scale)
+    x0 = torch.zeros(batch_size, 2, device=device, dtype=dtype)            # corpo 1 nell'origine
+    x1 = torch.zeros(batch_size, 2, device=device, dtype=dtype)
+    x1[:, 0] = torch.rand(batch_size, device=device, dtype=dtype) * 2 + 0.5  # corpo 2 su asse x, distanza in [0.5, 2.5]
 
-        m_0 = random.randint(1, 2*scale)
-        m_1 = random.randint(1, 2*scale)
-        batch.append((m_0, x_0[0], x_0[1], q_0[0], q_1[0], m_1, x_1[0], x_1[1], q_1[0], q_1[1]))
+    q0 = torch.randn(batch_size, 2, device=device, dtype=dtype) * 0.3      # velocità O(0.1-1)
+    q1 = torch.randn(batch_size, 2, device=device, dtype=dtype) * 0.3
 
-    return torch.tensor(batch, device=device, requires_grad=True)
+    state = torch.cat([m0, x0, q0, m1, x1, q1], dim=1)
+    state.requires_grad_(True)
+    return state
 
 
 def train_network(DEVICE: torch.device = torch.device('cpu')):
 
-    torch.manual_seed(42)
-
     print(f"Device {DEVICE}")
 
     # Parameters
-    dim = 2
+    dim = 10
 
-    pad_dim = 4
     n_blocks = 4
 
     epochs = 2000
     batch_size = 256
-    lr = 2**-7
+    lr = 1e-3
 
     # Network initialization
     BodyNetwork = AB2Net(
         in_features=dim,
-        out_features=2,
-        pad_dim=pad_dim,
+        out_features=8,
         num_blocks=n_blocks,
-        dtype=torch.float
+        dtype=torch.float64
     ).to(DEVICE)
 
     # Model training
@@ -210,19 +194,16 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
         lr=lr
     )
 
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=30,
-        gamma=0.96875,
-        last_epoch=-1
-    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                           mode='min', 
+                                                           factor=0.5, 
+                                                           patience=50)
 
     losses = train(
         epochs,
         BodyNetwork,
         optimizer,
         scheduler,
-        criterion=nn.CrossEntropyLoss(),
         device=DEVICE,
         batch_size = batch_size
     )
@@ -238,7 +219,7 @@ if __name__ == "__main__":
 
     PATH = "./PINN_savefile/save.pt"
 
-    torch.seed(42)
+    torch.manual_seed(42)
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net, optimizer, scheduler, epoch, losses = train_network(DEVICE)
     torch.save({
@@ -247,4 +228,4 @@ if __name__ == "__main__":
             "scheduler": scheduler.state_dict(),
             "epoch":     epoch,
             "losses":    losses
-        }, )
+        }, PATH)
