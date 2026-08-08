@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 from typing import Optional
 
@@ -33,66 +34,27 @@ class AB_Block(torch.nn.Module):
 
         return xp
     
-class multi_AB_Block(torch.nn.Module):
+class NBodyPermutationBlock(nn.Module):
     """
-    Linear layer parametrized as [A,B;B,A] such that if we permutate the input (instead of [x,y]
-    we do [y,x]) then the output is permutated as well.
-    This class is to do the permutation with n_obj elements, obviusly it requires that the size
-    of the layer is a multiple of n_obj, in input and in output.
+    Blocco lineare Equivariante per N corpi (Permutazione S_N).
+    Input:  x di forma [Batch, N, In_Channels] o [Batch, N, Dim, In_Channels]
+    Output: y di forma [Batch, N, Out_Channels] o [Batch, N, Dim, Out_Channels]
+    
+    Funziona con QUALSIASI valore di N senza dover ri-creare matrici!
     """
-
-    def __init__(
-        self,
-        in_feature: int,
-        out_feature: int,
-        n_obj: int,
-        bias: bool = True,
-        dtype: torch.dtype = torch.float,
-        device = None
-    ) -> None:
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = True, dtype=torch.float64, device=None):
         super().__init__()
-
-        if in_feature % n_obj != 0 or out_feature % n_obj != 0:
-            raise Exception("Error, for preserving the switch we need an amount of lines divisible " \
-            "with the number of objects.")
-
-        # A & B
-        self.A = torch.nn.Parameter(torch.empty(in_feature//n_obj, out_feature//n_obj, dtype=dtype, device=device))
-        self.B = torch.nn.Parameter(torch.empty(in_feature//n_obj, out_feature//n_obj, dtype=dtype, device=device))
-
-        torch.nn.init.xavier_normal_(self.A)
-        torch.nn.init.xavier_normal_(self.B)
-
-        for i in range(n_obj):
-            if i == 0:
-                self.AB = torch.cat((self.A, self.B), 0)
-            elif i == 1:
-                self.AB = torch.cat((self.B, self.A), 0)
-            else:
-                self.AB = torch.cat((self.B, self.B), 0)
-            for j in range(2, n_obj):
-                if i == j:
-                    self.AB = torch.cat((self.AB, self.A), 0)
-                else:
-                    self.AB = torch.cat((self.AB, self.B), 0)
-            
-            if i == 0:
-                self.matrix = self.AB.clone()
-            else:
-                self.matrix = torch.cat((self.matrix, self.AB), 1)
-
-        # bias
-        self.bias: Optional[torch.nn.Parameter] = None
-        if bias:
-            self.bias = torch.nn.Parameter(torch.empty(out_feature, dtype=dtype))
-            torch.nn.init.normal_(self.bias)
+        # Trasformazione per l'interazione con se stesso (A)
+        self.lin_self = nn.Linear(in_channels, out_channels, bias=False, dtype=dtype, device=device)
+        # Trasformazione per l'interazione con gli ALTRI corpi (B)
+        self.lin_other = nn.Linear(in_channels, out_channels, bias=bias, dtype=dtype, device=device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply equivariance weight matrix"""
+        # x ha forma: [Batch, N, ..., In_Channels]
+        # Sum lungo la dimensione dei corpi (dim 1)
+        sum_all = torch.sum(x, dim=1, keepdim=True)  # [Batch, 1, ..., In_Channels]
+        sum_others = sum_all - x                     # [Batch, N, ..., In_Channels] (S - x_i)
 
-        xp = torch.matmul(self.matrix, x.unsqueeze(-1)).squeeze(1)
-
-        if self.bias is not None:
-            xp = xp + self.bias
-
-        return xp
+        # y_i = A(x_i) + B(sum_{j != i} x_j)
+        out = self.lin_self(x) + self.lin_other(sum_others)
+        return out

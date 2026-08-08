@@ -1,16 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-from networks import AB2Net, FullyEquivariant2BodyNet
+from networks import AB2Net, FullyEquivariant2BodyNet, Acceleration2BodyNet
 import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
-
-'''
-L'output della rete adesso è m_1, p_1 vettore, q_1 vettore e avanti così
-Bisogna modificare tutte le loss
-'''
 
 '''
 def save_checkpoint(model, optimizer, scheduler, epoch, path):
@@ -28,35 +24,34 @@ def save_checkpoint(model, optimizer, scheduler, epoch, path):
 
 def canonicalize_translation(state: torch.Tensor):
     """
-    Trasla lo stato [Batch, N * 5] in modo che il corpo più a sinistra (min x)
-    vada in (0, 0). Tutti gli altri corpi avranno x >= 0 (semipiano destro).
-    Nessuna rotazione applicata.
+    Trasla lo stato [Batch, N * 5] in modo che il Centro di Massa (CoM)
+    sia esattamente in (0, 0).
     
     Restituisce:
-    - state_canon: lo stato traslato
-    - p_min: il vettore di traslazione [Batch, 1, 2] per poter tornare indietro
+    - state_canon: lo stato traslato col CoM in (0,0)
+    - R_cm: il vettore di traslazione del CoM [Batch, 1, 2] per ripristinare le posizioni originali
     """
     B = state.shape[0]
     x_r = state.view(B, -1, 5) # [Batch, N, 5] -> [m, x, y, vx, vy]
 
     m = x_r[:, :, 0:1]     # [B, N, 1]
     p = x_r[:, :, 1:3]     # [B, N, 2]
-    v = x_r[:, :, 3:5]     # [B, N, 2] (le velocità NON cambiano per pura traslazione)
+    v = x_r[:, :, 3:5]     # [B, N, 2] (le velocità non cambiano per traslazione spaziale)
 
-    # Trova la posizione del corpo con coordinata x minima
-    idx_min = torch.argmin(p[:, :, 0], dim=1)                # [B]
-    p_min = p[torch.arange(B), idx_min].unsqueeze(1)         # [B, 1, 2]
+    # Calcolo del Centro di Massa: R_cm = sum(m_i * p_i) / sum(m_i)
+    M_tot = torch.sum(m, dim=1, keepdim=True) # [B, 1, 1]
+    R_cm = torch.sum(m * p, dim=1, keepdim=True) / M_tot # [B, 1, 2]
 
-    # Traslazione delle posizioni: il nodo min x diventa (0, 0)
-    p_canon = p - p_min  
+    # Traslazione delle posizioni: CoM diventa (0, 0)
+    p_canon = p - R_cm  
 
     state_canon = torch.cat([m, p_canon, v], dim=-1).view(B, -1)
-    return state_canon, p_min
+    return state_canon, R_cm
 
 
-def uncanonicalize_translation(state_canon: torch.Tensor, p_min: torch.Tensor):
+def uncanonicalize_translation(state_canon: torch.Tensor, R_cm: torch.Tensor):
     """
-    Ripristina le posizioni originali sommando indietro p_min.
+    Ripristina le posizioni originali sommando indietro R_cm.
     """
     B = state_canon.shape[0]
     x_r = state_canon.view(B, -1, 5)
@@ -65,50 +60,63 @@ def uncanonicalize_translation(state_canon: torch.Tensor, p_min: torch.Tensor):
     p_canon = x_r[:, :, 1:3]
     v = x_r[:, :, 3:5]
 
-    p_orig = p_canon + p_min
+    p_orig = p_canon + R_cm
 
     state_orig = torch.cat([m, p_orig, v], dim=-1).view(B, -1)
     return state_orig
 
-def physics_loss_2_body(input, output, dt, G=1.0, eps=1e-3):
-    m1, m2 = output[:, 0], output[:, 5]
 
-    x1_p, y1_p = input[:, 1:2], input[:, 2:3]
-    vx1_p, vy1_p = input[:, 3:4], input[:, 4:5]
-    x2_p, y2_p = input[:, 6:7], input[:, 7:8]
-    vx2_p, vy2_p = input[:, 8:9], input[:, 9:10]
+def compute_lrl_vector(states, G=1.0, eps=1e-2):
+    """Calcola il vettore LRL per ciascun campione nel batch."""
+    m1, m2 = states[:, 0:1], states[:, 5:6]
+    M_tot = m1 + m2
+    
+    r = states[:, 6:8] - states[:, 1:3]     # r_12 [B, 2]
+    v = states[:, 8:10] - states[:, 3:5]   # v_12 [B, 2]
+    
+    r_norm = torch.sqrt(torch.sum(r**2, dim=1, keepdim=True) + eps**2)
+    
+    # Prodotto vettoriale v x L in 2D
+    L_z = r[:, 0:1] * v[:, 1:2] - r[:, 1:2] * v[:, 0:1]
+    v_cross_L = torch.cat([v[:, 1:2] * L_z, -v[:, 0:1] * L_z], dim=1)
+    
+    # Vettore A di Runge-Lenz
+    A = v_cross_L - G * M_tot * (r / r_norm)
+    return A
 
-    x1, y1 = output[:, 1:2], output[:, 2:3]
-    vx1, vy1 = output[:, 3:4], output[:, 4:5]
-    x2, y2 = output[:, 6:7], output[:, 7:8]
-    vx2, vy2 = output[:, 8:9], output[:, 9:10]
 
-    def accel(xa, ya, xb, yb, m_other):
-        r = torch.sqrt((xb - xa) ** 2 + (yb - ya) ** 2 + eps ** 2)
-        return G * m_other * (xb - xa) / r ** 3, G * m_other * (yb - ya) / r ** 3
+def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net=None):
+    """
+    Valuta se l'accelerazione appresa dalla rete coincide con l'accelerazione
+    gravitazionale di Newton a_grav = G * m_other * r / |r|^3
+    """
+    B = input_state.shape[0]
+    x_r = input_state.view(B, 2, 5)
 
-    ax1_p, ay1_p = accel(x1_p, y1_p, x2_p, y2_p, m2)
-    ax2_p, ay2_p = accel(x2_p, y2_p, x1_p, y1_p, m1)
+    m1, m2 = x_r[:, 0, 0:1], x_r[:, 1, 0:1] # [B, 1]
+    p1, p2 = x_r[:, 0, 1:3], x_r[:, 1, 1:3] # [B, 2]
 
-    # v(t+dt/2), usata solo internamente per il residuo di posizione (velocity Verlet)
-    vx1_half = vx1_p + 0.5 * ax1_p * dt
-    vy1_half = vy1_p + 0.5 * ay1_p * dt
-    vx2_half = vx2_p + 0.5 * ax2_p * dt
-    vy2_half = vy2_p + 0.5 * ay2_p * dt
+    # Vettore distanza relativa r_12 e r_21
+    r12 = p2 - p1
+    dist = torch.sqrt(torch.sum(r12**2, dim=-1, keepdim=True) + eps**2) # [B, 1]
 
-    loss = (torch.mean((x1 - x1_p - vx1_half * dt) ** 2) +
-            torch.mean((y1 - y1_p - vy1_half * dt) ** 2) +
-            torch.mean((x2 - x2_p - vx2_half * dt) ** 2) +
-            torch.mean((y2 - y2_p - vy2_half * dt) ** 2))
+    # Accelerazione gravitazionale ESATTA (Target di Newton)
+    a1_target = G * m2 * r12 / (dist ** 3)
+    a2_target = - G * m1 * r12 / (dist ** 3)
+    a_target = torch.stack([a1_target, a2_target], dim=1) # [B, 2, 2]
 
-    ax1, ay1 = accel(x1, y1, x2, y2, m2)   # forza valutata sulla posizione predetta
-    ax2, ay2 = accel(x2, y2, x1, y1, m1)
+    # Accelerazione PREDETTA dalla rete sullo stato corrente
+    # Se passi 'net' usiamo la funzione interna predict_acceleration
+    if net is not None:
+        a_pred = net.predict_acceleration(input_state)
+    else:
+        # Alternativa derivata dall'output del forward via Verlet: a ~ (v_next - v) / dt
+        v_in = x_r[:, :, 3:5]
+        v_out = output_state.view(B, 2, 5)[:, :, 3:5]
+        a_pred = (v_out - v_in) / dt
 
-    loss = loss + (
-        torch.mean((vx1 - vx1_half - 0.5 * ax1 * dt) ** 2) +
-        torch.mean((vy1 - vy1_half - 0.5 * ay1 * dt) ** 2) +
-        torch.mean((vx2 - vx2_half - 0.5 * ax2 * dt) ** 2) +
-        torch.mean((vy2 - vy2_half - 0.5 * ay2 * dt) ** 2))
+    # Huber Loss (Smooth L1) per evitare instabilità ai pericentri
+    loss = F.smooth_l1_loss(a_pred, a_target, beta=1e-2)
     return loss
 
 
@@ -135,7 +143,7 @@ def compute_angular_momentum(states):
     return L
 
 
-def conservation_loss(initial, output, G=1.0, eps=1e-3):
+def conservation_loss(initial, output, G=1.0, eps=1e-2):
     """Penalise RELATIVE energy and angular-momentum drift rispetto allo stato INIZIALE
     della traiettoria (non allo step precedente): la legge di conservazione dice
     E(t) = E(0) per ogni t, quindi il riferimento corretto è sempre lo stato a inizio
@@ -150,7 +158,7 @@ def conservation_loss(initial, output, G=1.0, eps=1e-3):
 
 
 def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
-               total_t_max, c_weight, dtype):
+               total_t_max, c_weight, dtype, a_weight):
     """Un'epoca di training: rollout autoregressivo, loss, backward, step.
     Fattorizzata a parte perche' e' condivisa identica tra fase di pretraining
     (c_weight=0) e fase principale (c_weight>0) -- l'unica differenza tra le due
@@ -163,16 +171,22 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
     total = 0
     p_total = 0
     c_total = 0
+    #a_total = 0
     current_input = generate_instance(batch_size, device, dtype=dtype)
     initial = current_input.clone()  # riferimento fisso per la conservation loss
 
     for _ in range(total_t):
-        output = BodyNetwork(current_input)
+        # Assicurati che il forward della rete e la loss usino lo stesso dt se necessario
+        output = BodyNetwork(current_input, dt) 
         
-        p_loss = physics_loss_2_body(current_input, output, dt)
-        c_loss = conservation_loss(initial, output)
+        # Passiamo net=BodyNetwork alla physics loss per usare direttamente predict_acceleration
+        p_loss = physics_loss_2_body(current_input, output, dt=dt, net=BodyNetwork)
+        c_loss = conservation_loss(initial, output, eps=1e-2)
 
-        total += p_loss + c_weight * c_loss
+        A, A0 = compute_lrl_vector(output, eps=1e-2), compute_lrl_vector(initial, eps=1e-2)
+        loss_A = torch.mean(((A - A0) / (A0.abs() + 1e-2)) ** 2)
+
+        total += p_loss + c_weight * c_loss + a_weight * loss_A
         p_total += p_loss
         c_total += c_loss
 
@@ -202,7 +216,7 @@ def train(epochs_pretrain: int,
           scheduler,
           device: torch.device = torch.device('cpu'),
           batch_size: int = 256,
-          dt: float = 0.05,
+          dt: float = 0.01,
           dtype: torch.dtype = torch.float64):
     """
     Training in due fasi.
@@ -233,7 +247,7 @@ def train(epochs_pretrain: int,
         total_t_max = min(5, 1 + i // 200)
 
         result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
-                             batch_size, dt, total_t_max, c_weight=0.0, dtype = dtype)
+                             batch_size, dt, total_t_max, c_weight=0.0, dtype = dtype, a_weight=0.0)
         if result is None:
             continue
 
@@ -267,6 +281,9 @@ def train(epochs_pretrain: int,
     ramp_fraction = 0.5  # il curriculum arriva al massimo entro il 50% di epochs_main
     ramp_denom = max(1, int(epochs_main * ramp_fraction / max_horizon))
 
+    #a_weight = 0.0
+    a_weight = 0.5
+
     pbar = tqdm(range(epochs_main), desc="Training principale")
     for i in pbar:
         total_t_max = min(max_horizon, 1 + i // ramp_denom)
@@ -278,7 +295,7 @@ def train(epochs_pretrain: int,
         c_weight = min(i / 100, 1) / 2
 
         result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
-                             batch_size, dt, total_t_max, c_weight=c_weight, dtype=dtype)
+                             batch_size, dt, total_t_max, c_weight=c_weight, dtype=dtype, a_weight=a_weight)
         if result is None:
             continue
 
@@ -302,41 +319,43 @@ def generate_instance(batch_size=256,
     m2 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.5
     M_tot = m1 + m2
 
-    # 2. Corpo 1 in (0,0)
-    x1 = torch.zeros(batch_size, 1, device=device, dtype=dtype)
-    y1 = torch.zeros(batch_size, 1, device=device, dtype=dtype)
-
-    # 3. Distanza casuale r e angolo theta casuale nel semipiano destro (-pi/2 < theta < pi/2)
+    # 2. Distanza casuale r e angolo theta casuale (in tutto il piano, [0, 2*pi))
     dist = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 + 0.5
-    theta = (torch.rand(batch_size, 1, device=device, dtype=dtype) - 0.5) * np.pi * 0.9  # in (-pi/2, pi/2)
+    theta = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 * np.pi
 
-    x2 = dist * torch.cos(theta)  # Sempre > 0 per costruzione!
-    y2 = dist * torch.sin(theta)  # Può essere sia positivo che negativo
+    # Vettore posizione relativa r_12 = p2 - p1
+    rx = dist * torch.cos(theta)
+    ry = dist * torch.sin(theta)
 
-    # 4. Velocità orbitali relative coerenti con l'angolo theta
+    # Posizioni nel sistema del Centro di Massa (CoM in 0,0):
+    # m1 * p1 + m2 * p2 = 0  e  p2 - p1 = r12
+    # => p1 = -(m2 / M_tot) * r12
+    # => p2 =  (m1 / M_tot) * r12
+    x1 = -(m2 / M_tot) * rx
+    y1 = -(m2 / M_tot) * ry
+    x2 =  (m1 / M_tot) * rx
+    y2 =  (m1 / M_tot) * ry
+
+    # 3. Velocità orbitali
     v_circ = torch.sqrt(G * M_tot / dist)
-    ecc = torch.rand(batch_size, 1, device=device, dtype=dtype) * 0.2 + 0.8
-    v_tangential = v_circ * ecc
-    v_radial = (torch.rand(batch_size, 1, device=device, dtype=dtype) - 0.5) * 0.1 * v_circ
+    v_factor = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.3
+    v_tangential = v_circ * v_factor
+    v_radial = (torch.rand(batch_size, 1, device=device, dtype=dtype) - 0.5) * 1.0 * v_circ
 
-    # Ruotiamo i vettori di velocità radiale/tangenziale secondo theta
-    # Per una coordinata polare (r, theta):
-    # e_r = (cos theta, sin theta), e_theta = (-sin theta, cos theta)
     vx_rel = v_radial * torch.cos(theta) - v_tangential * torch.sin(theta)
     vy_rel = v_radial * torch.sin(theta) + v_tangential * torch.cos(theta)
 
-    # Velocità nel centro di massa
+    # Velocità nel centro di massa (V_cm = 0)
     vx1 = -(m2 / M_tot) * vx_rel
     vy1 = -(m2 / M_tot) * vy_rel
-    vx2 = (m1 / M_tot) * vx_rel
-    vy2 = (m1 / M_tot) * vy_rel
+    vx2 =  (m1 / M_tot) * vx_rel
+    vy2 =  (m1 / M_tot) * vy_rel
 
     raw_state = torch.cat([m1, x1, y1, vx1, vy1, m2, x2, y2, vx2, vy2], dim=1)
     
-    # Assicuriamo la canonizzazione traslazionale
+    # Ritorna lo stato canonico (CoM in 0,0)
     state_canon, _ = canonicalize_translation(raw_state)
     return state_canon
-
 
 def train_network(DEVICE: torch.device = torch.device('cpu')):
 
@@ -347,15 +366,15 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
     n_blocks = 4
 
     epochs_pretrain = 1000
-    epochs_main = 2000
+    epochs_main = 3000
     batch_size = 256
     lr = 1e-3
-    dt = 0.05
+    dt = 0.01
 
     dtype = torch.float64
 
     # Network initialization
-    BodyNetwork = FullyEquivariant2BodyNet(
+    BodyNetwork = Acceleration2BodyNet(
         num_blocks=n_blocks,
         dtype=dtype,
         device=DEVICE
@@ -394,7 +413,7 @@ if __name__ == "__main__":
 
     print("=" * 90)
 
-    PATH = "./PINN_savefile/save_equivariance.pt"
+    PATH = "./PINN_savefile/save_equivariance_acc.pt"
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)  # fissa anche l'RNG della GPU, non solo quello CPU

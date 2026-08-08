@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from networks import AB2Net, FullyEquivariant2BodyNet
+from networks import AB2Net, FullyEquivariant2BodyNet, Acceleration2BodyNet
 import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
@@ -135,7 +135,7 @@ def solve_twobody(state0, masses, dt, n_points, G=1.0):
 
 
 
-def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.05, seed_state=None, dtype=torch.float64):
+def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.01, seed_state=None, dtype=torch.float64):
     BodyNetwork.eval()
 
     # Stato iniziale (già canonizzato da generate_instance)
@@ -151,7 +151,7 @@ def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.05, see
             s_canon, p_min = canonicalize_translation(s_abs)
             
             # 2. La rete predice lo stato canonico al tempo t+1
-            out_canon = BodyNetwork(s_canon)
+            out_canon = BodyNetwork(s_canon, dt)
             
             # 3. Riportiamo l'output nel sistema di riferimento globale
             s_abs = uncanonicalize_translation(out_canon, p_min)
@@ -242,7 +242,7 @@ def direction_diagnostic(BodyNetwork, device, dt, n_samples=200, eps=1e-3, G=1.0
             
             # Canonizziamo prima del forward
             s0_canon, p_min = canonicalize_translation(s0)
-            s1_canon = BodyNetwork(s0_canon)
+            s1_canon = BodyNetwork(s0_canon, dt)
             s1 = uncanonicalize_translation(s1_canon, p_min)
 
             for body, (idx_pos, idx_vel, angles, ratios) in enumerate([
@@ -366,17 +366,21 @@ if __name__ == "__main__":
 
     print("=" * 90)
 
-    PATH = "./PINN_savefile/save_equivariance.pt"  # percorso aggiornato
+    PATH = "./PINN_savefile/save_equivariance_acc.pt"  # percorso aggiornato
 
-    torch.manual_seed(42)
+    torch.manual_seed(63)
+
+    #63 ellissi
+    #resto di solito fionda (42)
+
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_blocks = 4
-    dt = 0.05
-    rollout_steps = 200
+    dt = 0.01
+    rollout_steps = 1000
     dtype = torch.float64
 
-    BodyNetwork = FullyEquivariant2BodyNet(
+    BodyNetwork = Acceleration2BodyNet(
         num_blocks=n_blocks,
         dtype=dtype,
         device=DEVICE
