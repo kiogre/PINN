@@ -3,7 +3,8 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from networks import AB2Net, FullyEquivariant2BodyNet, Acceleration2BodyNet
+from networks import Acceleration2BodyNet, Acceleration2BodyNetv2
+from networks import Acceleration2BodyNetv3, Acceleration2BodyNetv4
 import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
@@ -15,6 +16,8 @@ from train import (
     canonicalize_translation,
     uncanonicalize_translation,
 )
+
+from networks_2 import Acceleration2BodyNetv5, Acceleration2BodyNetv6
 
 
 def compute_momentum(states):
@@ -366,12 +369,12 @@ if __name__ == "__main__":
 
     print("=" * 90)
 
-    PATH = "./PINN_savefile/save_equivariance_acc.pt"  # percorso aggiornato
+    PATH = "./PINN_savefile/save_equivariance_acc_v5_gpinn.pt"  # percorso aggiornato
 
     torch.manual_seed(63)
 
     #63 ellissi
-    #resto di solito fionda (42)
+    #fionda 420 e fa MOLTO SCHIFO
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -380,7 +383,7 @@ if __name__ == "__main__":
     rollout_steps = 1000
     dtype = torch.float64
 
-    BodyNetwork = Acceleration2BodyNet(
+    BodyNetwork = Acceleration2BodyNetv5(
         num_blocks=n_blocks,
         dtype=dtype,
         device=DEVICE

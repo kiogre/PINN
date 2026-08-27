@@ -8,44 +8,24 @@ from networks import Acceleration2BodyNetv3, Acceleration2BodyNetv4
 import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
-
-'''
-def save_checkpoint(model, optimizer, scheduler, epoch, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    torch.save({
-        "model":     model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "epoch":     epoch,
-    }, tmp)
-    #os.replace(tmp, path)
-    #tqdm.write(f"  -> checkpoint salvato: {path}  (epoch {epoch})")
-'''
+from networks_2 import Acceleration2BodyNetv5, Acceleration2BodyNetv6
 
 def canonicalize_translation(state: torch.Tensor):
     """
     Trasla lo stato [Batch, N * 5] in modo che il Centro di Massa (CoM)
     sia esattamente in (0, 0).
-    
-    Restituisce:
-    - state_canon: lo stato traslato col CoM in (0,0)
-    - R_cm: il vettore di traslazione del CoM [Batch, 1, 2] per ripristinare le posizioni originali
     """
     B = state.shape[0]
     x_r = state.view(B, -1, 5) # [Batch, N, 5] -> [m, x, y, vx, vy]
 
     m = x_r[:, :, 0:1]     # [B, N, 1]
     p = x_r[:, :, 1:3]     # [B, N, 2]
-    v = x_r[:, :, 3:5]     # [B, N, 2] (le velocità non cambiano per traslazione spaziale)
+    v = x_r[:, :, 3:5]     # [B, N, 2]
 
-    # Calcolo del Centro di Massa: R_cm = sum(m_i * p_i) / sum(m_i)
     M_tot = torch.sum(m, dim=1, keepdim=True) # [B, 1, 1]
     R_cm = torch.sum(m * p, dim=1, keepdim=True) / M_tot # [B, 1, 2]
 
-    # Traslazione delle posizioni: CoM diventa (0, 0)
     p_canon = p - R_cm  
-
     state_canon = torch.cat([m, p_canon, v], dim=-1).view(B, -1)
     return state_canon, R_cm
 
@@ -62,7 +42,6 @@ def uncanonicalize_translation(state_canon: torch.Tensor, R_cm: torch.Tensor):
     v = x_r[:, :, 3:5]
 
     p_orig = p_canon + R_cm
-
     state_orig = torch.cat([m, p_orig, v], dim=-1).view(B, -1)
     return state_orig
 
@@ -77,48 +56,88 @@ def compute_lrl_vector(states, G=1.0, eps=1e-2):
     
     r_norm = torch.sqrt(torch.sum(r**2, dim=1, keepdim=True) + eps**2)
     
-    # Prodotto vettoriale v x L in 2D
     L_z = r[:, 0:1] * v[:, 1:2] - r[:, 1:2] * v[:, 0:1]
     v_cross_L = torch.cat([v[:, 1:2] * L_z, -v[:, 0:1] * L_z], dim=1)
     
-    # Vettore A di Runge-Lenz
     A = v_cross_L - G * M_tot * (r / r_norm)
     return A
 
 
-def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net=None):
+def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net=None, g_weight=0.1):
     """
-    Valuta se l'accelerazione appresa dalla rete coincide con l'accelerazione
-    gravitazionale di Newton a_grav = G * m_other * r / |r|^3
+    g-PINN Loss:
+    1. Valuta la differenza tra accelerazione appresa e accelerazione teorica (residual loss).
+    2. Valuta la differenza tra i GRADIENTI dell'accelerazione appresa e i GRADIENTI 
+       dell'accelerazione teorica rispetto alle posizioni (gradient residual loss).
     """
     B = input_state.shape[0]
+
+    # Abilita la registrazione dei gradienti sull'input per g-PINN
+    if not input_state.requires_grad:
+        input_state = input_state.clone().detach().requires_grad_(True)
+
     x_r = input_state.view(B, 2, 5)
 
     m1, m2 = x_r[:, 0, 0:1], x_r[:, 1, 0:1] # [B, 1]
     p1, p2 = x_r[:, 0, 1:3], x_r[:, 1, 1:3] # [B, 2]
 
-    # Vettore distanza relativa r_12 e r_21
-    r12 = p2 - p1
-    dist = torch.sqrt(torch.sum(r12**2, dim=-1, keepdim=True) + eps**2) # [B, 1]
+    # Vettore distanza relativa r_12 = p2 - p1
+    r12 = p2 - p1 # [B, 2]
+    dist_sq = torch.sum(r12**2, dim=-1, keepdim=True) + eps**2
+    dist = torch.sqrt(dist_sq) # [B, 1]
 
     # Accelerazione gravitazionale ESATTA (Target di Newton)
     a1_target = G * m2 * r12 / (dist ** 3)
     a2_target = - G * m1 * r12 / (dist ** 3)
     a_target = torch.stack([a1_target, a2_target], dim=1) # [B, 2, 2]
 
-    # Accelerazione PREDETTA dalla rete sullo stato corrente
-    # Se passi 'net' usiamo la funzione interna predict_acceleration
+    # Predizione della rete
     if net is not None:
-        a_pred = net.predict_acceleration(input_state)
+        a_pred = net.predict_acceleration(input_state) # [B, 2, 2] o formato compatibile
     else:
-        # Alternativa derivata dall'output del forward via Verlet: a ~ (v_next - v) / dt
         v_in = x_r[:, :, 3:5]
         v_out = output_state.view(B, 2, 5)[:, :, 3:5]
         a_pred = (v_out - v_in) / dt
 
-    # Huber Loss (Smooth L1) per evitare instabilità ai pericentri
-    loss = F.smooth_l1_loss(a_pred, a_target, beta=1e-2)
-    return loss
+    # 1. Standard PINN Loss (Residual)
+    loss_res = F.smooth_l1_loss(a_pred, a_target, beta=1e-2)
+
+    # 2. Gradient-enhanced (g-PINN) Component
+    # Derivata analitica di a_target rispetto a p1 e p2 (via r12)
+    # da/dr = G*m * (I / |r|^3 - 3 * r (r^T) / |r|^5)
+    I = torch.eye(2, device=input_state.device, dtype=input_state.dtype).unsqueeze(0) # [1, 2, 2]
+    r_outer = torch.bmm(r12.unsqueeze(2), r12.unsqueeze(1)) # [B, 2, 2]
+    
+    grad_a1_target = G * m2.unsqueeze(-1) * (I / (dist.unsqueeze(-1)**3) - 3 * r_outer / (dist.unsqueeze(-1)**5))
+    
+    # Calcolo dei gradienti di a_pred rispetto all'input tramite autograd.
+    # Teniamo il vettore COMPLETO (10 componenti) invece di tagliare subito
+    # a p1: le colonne relative a p2 (indici 6:8) sono già calcolate da questa
+    # stessa chiamata, a costo zero, e portano un secondo vincolo fisico.
+    grad_a1_x_full = torch.autograd.grad(
+        a_pred[:, 0, 0], input_state,
+        grad_outputs=torch.ones_like(a_pred[:, 0, 0]),
+        create_graph=True, retain_graph=True
+    )[0] # [B, 10] -- derivate di a1x rispetto a tutto lo stato
+
+    grad_a1_y_full = torch.autograd.grad(
+        a_pred[:, 0, 1], input_state,
+        grad_outputs=torch.ones_like(a_pred[:, 0, 1]),
+        create_graph=True, retain_graph=True
+    )[0] # [B, 10] -- derivate di a1y rispetto a tutto lo stato
+
+    # d(a1)/d(p1): r12 = p2 - p1  =>  d(a1)/d(p1) = -grad_a1_target
+    grad_a1_pred_p1 = torch.stack([grad_a1_x_full[:, 1:3], grad_a1_y_full[:, 1:3]], dim=1) # [B, 2, 2]
+    # d(a1)/d(p2): stesso ragionamento  =>  d(a1)/d(p2) = +grad_a1_target
+    grad_a1_pred_p2 = torch.stack([grad_a1_x_full[:, 6:8], grad_a1_y_full[:, 6:8]], dim=1) # [B, 2, 2]
+
+    # Loss sui gradienti della risposta della rete (Grad-Loss), su entrambi i vincoli
+    loss_grad_p1 = F.smooth_l1_loss(grad_a1_pred_p1, -grad_a1_target, beta=1e-2)
+    loss_grad_p2 = F.smooth_l1_loss(grad_a1_pred_p2, grad_a1_target, beta=1e-2)
+    loss_grad = 0.5 * (loss_grad_p1 + loss_grad_p2)
+
+    total_physics_loss = loss_res + g_weight * loss_grad
+    return total_physics_loss
 
 
 def compute_energy(states, G=1.0, eps=1e-3):
@@ -145,11 +164,7 @@ def compute_angular_momentum(states):
 
 
 def conservation_loss(initial, output, G=1.0, eps=1e-2):
-    """Penalise RELATIVE energy and angular-momentum drift rispetto allo stato INIZIALE
-    della traiettoria (non allo step precedente): la legge di conservazione dice
-    E(t) = E(0) per ogni t, quindi il riferimento corretto è sempre lo stato a inizio
-    rollout, non l'ultimo stato visitato.
-    """
+    """Penalise RELATIVE energy and angular-momentum drift."""
     E, E0 = compute_energy(output, G, eps), compute_energy(initial, G, eps)
     L, L0 = compute_angular_momentum(output), compute_angular_momentum(initial)
 
@@ -159,12 +174,7 @@ def conservation_loss(initial, output, G=1.0, eps=1e-2):
 
 
 def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
-               total_t_max, c_weight, dtype, a_weight):
-    """Un'epoca di training: rollout autoregressivo, loss, backward, step.
-    Fattorizzata a parte perche' e' condivisa identica tra fase di pretraining
-    (c_weight=0) e fase principale (c_weight>0) -- l'unica differenza tra le due
-    fasi e' come viene calcolato c_weight e total_t_max da fuori.
-    """
+               total_t_max, c_weight, dtype, a_weight, g_weight=0.1):
     optimizer.zero_grad()
 
     total_t = random.randint(1, total_t_max)
@@ -172,16 +182,15 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
     total = 0
     p_total = 0
     c_total = 0
-    #a_total = 0
+    
     current_input = generate_instance(batch_size, device, dtype=dtype)
-    initial = current_input.clone()  # riferimento fisso per la conservation loss
+    initial = current_input.clone()
 
     for _ in range(total_t):
-        # Assicurati che il forward della rete e la loss usino lo stesso dt se necessario
         output = BodyNetwork(current_input, dt) 
         
-        # Passiamo net=BodyNetwork alla physics loss per usare direttamente predict_acceleration
-        p_loss = physics_loss_2_body(current_input, output, dt=dt, net=BodyNetwork)
+        # Inserita la g_weight per abilitare la perdita sui gradienti della g-PINN
+        p_loss = physics_loss_2_body(current_input, output, dt=dt, net=BodyNetwork, g_weight=g_weight)
         c_loss = conservation_loss(initial, output, eps=1e-2)
 
         A, A0 = compute_lrl_vector(output, eps=1e-2), compute_lrl_vector(initial, eps=1e-2)
@@ -191,7 +200,6 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
         p_total += p_loss
         c_total += c_loss
 
-        # Canonizziamo l'output per usarlo come input del prossimo step nel rollout
         current_input, _ = canonicalize_translation(output)
 
     total /= total_t
@@ -218,37 +226,17 @@ def train(epochs_pretrain: int,
           device: torch.device = torch.device('cpu'),
           batch_size: int = 256,
           dt: float = 0.01,
-          dtype: torch.dtype = torch.float64):
-    """
-    Training in due fasi.
-
-    Fase 1 (pretraining, epochs_pretrain epoche): loss = SOLO p_loss (c_weight=0),
-    rollout corto (total_t max = 5, fisso e piccolo). Obiettivo: imparare la
-    dinamica di base -- direzione e modulo dello spostamento per singolo step --
-    senza interferenza del termine di conservazione, replicando le condizioni del
-    test di overfitting su batch fisso che ha convergo in poche centinaia di
-    epoche. Qui i dati SONO variabili (generate_instance ad ogni epoca), quindi
-    serve piu' training del test isolato, ma senza la distrazione di c_loss il
-    segnale utile arriva alla rete molto piu' pulito fin da subito.
-
-    Fase 2 (principale, epochs_main epoche): loss = p_loss + c_weight*c_loss,
-    con c_weight che cresce gradualmente da 0 e curriculum su total_t che
-    allunga il rollout fino a 30 step. Qui la rete, gia' partita da una dinamica
-    di base corretta, viene raffinata per rispettare anche la conservazione e
-    per restare stabile su rollout piu' lunghi.
-    """
+          dtype: torch.dtype = torch.float64,
+          g_weight: float = 0.1):
 
     loss_history, p_loss_history, c_loss_history = [], [], []
 
-    # ------------------------------------------------------------
-    # Fase 1: pretraining, solo p_loss, rollout corto
-    # ------------------------------------------------------------
-    pbar = tqdm(range(epochs_pretrain), desc="Pretraining (solo p_loss)")
+    pbar = tqdm(range(epochs_pretrain), desc="Pretraining (g-PINN solo p_loss)")
     for i in pbar:
         total_t_max = min(5, 1 + i // 200)
 
         result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
-                             batch_size, dt, total_t_max, c_weight=0.0, dtype = dtype, a_weight=0.0)
+                             batch_size, dt, total_t_max, c_weight=0.0, dtype=dtype, a_weight=0.0, g_weight=g_weight)
         if result is None:
             continue
 
@@ -260,43 +248,18 @@ def train(epochs_pretrain: int,
         pbar.set_postfix(p_loss=f"{p_loss_val:.4e}", c_loss=f"{c_loss_val:.4e}",
                           lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
-    # ------------------------------------------------------------
-    # Fase 2: training principale, p_loss + c_weight*c_loss, curriculum esteso
-    # ------------------------------------------------------------
-    # total_t_max sale fino a 80 (non piu' 30): con la base di direzione gia'
-    # solida dal pretraining, possiamo permetterci rollout piu' lunghi senza
-    # ripartire da una direzione rumorosa.
-    #
-    # c_weight sale fino a 1/2 (non piu' 1/5) e viene scalato anche in base a
-    # quanto e' lungo il rollout dell'epoca corrente: sui rollout piu' lunghi
-    # (dove la deriva di fase secolare pesa di piu') la conservazione conta
-    # relativamente di piu', spingendo la rete a restare fisicamente coerente
-    # anche oltre l'orizzonte breve.
-    # Il curriculum deve arrivare all'orizzonte massimo con margine sufficiente
-    # PRIMA della fine di epochs_main, cosi' resta abbastanza training a rollout
-    # lungo (non solo l'istante in cui lo si raggiunge). Il denominatore e' ora
-    # derivato da epochs_main invece che fisso, cosi' i due non possono
-    # disallinearsi come e' successo con epochs_main=2000 e ramp fisso a //40
-    # (che raggiungeva total_t_max=80 solo a epoca ~3160, mai vista qui).
     max_horizon = 80
-    ramp_fraction = 0.5  # il curriculum arriva al massimo entro il 50% di epochs_main
+    ramp_fraction = 0.5
     ramp_denom = max(1, int(epochs_main * ramp_fraction / max_horizon))
-
-    #a_weight = 0.0
     a_weight = 0.5
 
-    pbar = tqdm(range(epochs_main), desc="Training principale")
+    pbar = tqdm(range(epochs_main), desc="Training principale (g-PINN)")
     for i in pbar:
         total_t_max = min(max_horizon, 1 + i // ramp_denom)
-
-        # c_weight non e' piu' scalato dalla lunghezza del rollout corrente:
-        # quello scaling penalizzava proprio la fase in cui total_t_max era
-        # ancora sotto 30, riducendo il vincolo di conservazione quando invece
-        # avrebbe dovuto restare quello (gia' validato) della ricetta precedente.
         c_weight = min(i / 100, 1) / 2
 
         result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
-                             batch_size, dt, total_t_max, c_weight=c_weight, dtype=dtype, a_weight=a_weight)
+                             batch_size, dt, total_t_max, c_weight=c_weight, dtype=dtype, a_weight=a_weight, g_weight=g_weight)
         if result is None:
             continue
 
@@ -315,29 +278,21 @@ def generate_instance(batch_size=256,
                       device=torch.device('cpu'),
                       dtype=torch.float64,
                       G=1.0):
-    # 1. Masse
     m1 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.5
     m2 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.5
     M_tot = m1 + m2
 
-    # 2. Distanza casuale r e angolo theta casuale (in tutto il piano, [0, 2*pi))
     dist = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 + 0.5
     theta = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 * np.pi
 
-    # Vettore posizione relativa r_12 = p2 - p1
     rx = dist * torch.cos(theta)
     ry = dist * torch.sin(theta)
 
-    # Posizioni nel sistema del Centro di Massa (CoM in 0,0):
-    # m1 * p1 + m2 * p2 = 0  e  p2 - p1 = r12
-    # => p1 = -(m2 / M_tot) * r12
-    # => p2 =  (m1 / M_tot) * r12
     x1 = -(m2 / M_tot) * rx
     y1 = -(m2 / M_tot) * ry
     x2 =  (m1 / M_tot) * rx
     y2 =  (m1 / M_tot) * ry
 
-    # 3. Velocità orbitali
     v_circ = torch.sqrt(G * M_tot / dist)
     v_factor = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.3
     v_tangential = v_circ * v_factor
@@ -346,42 +301,36 @@ def generate_instance(batch_size=256,
     vx_rel = v_radial * torch.cos(theta) - v_tangential * torch.sin(theta)
     vy_rel = v_radial * torch.sin(theta) + v_tangential * torch.cos(theta)
 
-    # Velocità nel centro di massa (V_cm = 0)
     vx1 = -(m2 / M_tot) * vx_rel
     vy1 = -(m2 / M_tot) * vy_rel
     vx2 =  (m1 / M_tot) * vx_rel
     vy2 =  (m1 / M_tot) * vy_rel
 
     raw_state = torch.cat([m1, x1, y1, vx1, vy1, m2, x2, y2, vx2, vy2], dim=1)
-    
-    # Ritorna lo stato canonico (CoM in 0,0)
     state_canon, _ = canonicalize_translation(raw_state)
     return state_canon
+
 
 def train_network(DEVICE: torch.device = torch.device('cpu')):
 
     print(f"Device {DEVICE}")
 
-    # Parameters
-    n_body = 2
     n_blocks = 4
-
     epochs_pretrain = 1000
     epochs_main = 3000
     batch_size = 256
     lr = 1e-3
     dt = 0.01
+    g_weight = 0.1 # Peso per il termine di gradient-enhanced loss
 
     dtype = torch.float64
 
-    # Network initialization
-    BodyNetwork = Acceleration2BodyNetv4(
+    BodyNetwork = Acceleration2BodyNetv6(
         num_blocks=n_blocks,
         dtype=dtype,
         device=DEVICE
     ).to(DEVICE)
 
-    # Model training
     optimizer = torch.optim.Adam(
         BodyNetwork.parameters(),
         lr=lr
@@ -392,7 +341,7 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
         mode='min',
         factor=0.5,
         patience=50,
-        min_lr=1e-6  # evita che il lr collassi fino a diventare inutile su un plateau rumoroso
+        min_lr=1e-6
     )
 
     losses, p_losses, c_losses = train(
@@ -404,7 +353,8 @@ def train_network(DEVICE: torch.device = torch.device('cpu')):
         device=DEVICE,
         batch_size=batch_size,
         dt=dt,
-        dtype=dtype
+        dtype=dtype,
+        g_weight=g_weight
     )
 
     return BodyNetwork, optimizer, scheduler, epochs_pretrain + epochs_main, losses, p_losses, c_losses
@@ -414,10 +364,10 @@ if __name__ == "__main__":
 
     print("=" * 90)
 
-    PATH = "./PINN_savefile/save_equivariance_acc_v4.pt"
+    PATH = "./PINN_savefile/save_equivariance_acc_v6_gpinn.pt"
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)  # fissa anche l'RNG della GPU, non solo quello CPU
+    torch.cuda.manual_seed_all(42)
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net, optimizer, scheduler, epoch, losses, p_losses, c_losses = train_network(DEVICE)
@@ -432,10 +382,10 @@ if __name__ == "__main__":
     }, PATH)
 
     plt.plot(losses, label="total", alpha=0.6)
-    plt.plot(p_losses, label="p_loss", alpha=0.8)
+    plt.plot(p_losses, label="p_loss (g-PINN)", alpha=0.8)
     plt.plot(c_losses, label="c_loss", alpha=0.8)
     plt.yscale('log')
     plt.xlabel('epoch')
     plt.ylabel('loss')
     plt.legend()
-    plt.savefig('loss_curve.png')
+    plt.savefig('loss_curve_gpinn.png')
