@@ -110,10 +110,6 @@ def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net
     
     grad_a1_target = G * m2.unsqueeze(-1) * (I / (dist.unsqueeze(-1)**3) - 3 * r_outer / (dist.unsqueeze(-1)**5))
     
-    # Calcolo dei gradienti di a_pred rispetto all'input tramite autograd.
-    # Teniamo il vettore COMPLETO (10 componenti) invece di tagliare subito
-    # a p1: le colonne relative a p2 (indici 6:8) sono già calcolate da questa
-    # stessa chiamata, a costo zero, e portano un secondo vincolo fisico.
     grad_a1_x_full = torch.autograd.grad(
         a_pred[:, 0, 0], input_state,
         grad_outputs=torch.ones_like(a_pred[:, 0, 0]),

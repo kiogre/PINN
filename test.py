@@ -17,7 +17,7 @@ from train import (
     uncanonicalize_translation,
 )
 
-from networks_2 import Acceleration2BodyNetv5, Acceleration2BodyNetv6
+from networks_2 import Acceleration2BodyNetv5
 
 
 def compute_momentum(states):

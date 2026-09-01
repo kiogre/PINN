@@ -9,19 +9,6 @@ import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
 
-'''
-def save_checkpoint(model, optimizer, scheduler, epoch, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    torch.save({
-        "model":     model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "epoch":     epoch,
-    }, tmp)
-    #os.replace(tmp, path)
-    #tqdm.write(f"  -> checkpoint salvato: {path}  (epoch {epoch})")
-'''
 
 def canonicalize_translation(state: torch.Tensor):
     """
@@ -65,25 +52,6 @@ def uncanonicalize_translation(state_canon: torch.Tensor, R_cm: torch.Tensor):
 
     state_orig = torch.cat([m, p_orig, v], dim=-1).view(B, -1)
     return state_orig
-
-
-def compute_lrl_vector(states, G=1.0, eps=1e-2):
-    """Calcola il vettore LRL per ciascun campione nel batch."""
-    m1, m2 = states[:, 0:1], states[:, 5:6]
-    M_tot = m1 + m2
-    
-    r = states[:, 6:8] - states[:, 1:3]     # r_12 [B, 2]
-    v = states[:, 8:10] - states[:, 3:5]   # v_12 [B, 2]
-    
-    r_norm = torch.sqrt(torch.sum(r**2, dim=1, keepdim=True) + eps**2)
-    
-    # Prodotto vettoriale v x L in 2D
-    L_z = r[:, 0:1] * v[:, 1:2] - r[:, 1:2] * v[:, 0:1]
-    v_cross_L = torch.cat([v[:, 1:2] * L_z, -v[:, 0:1] * L_z], dim=1)
-    
-    # Vettore A di Runge-Lenz
-    A = v_cross_L - G * M_tot * (r / r_norm)
-    return A
 
 
 def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net=None):
@@ -184,10 +152,7 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
         p_loss = physics_loss_2_body(current_input, output, dt=dt, net=BodyNetwork)
         c_loss = conservation_loss(initial, output, eps=1e-2)
 
-        A, A0 = compute_lrl_vector(output, eps=1e-2), compute_lrl_vector(initial, eps=1e-2)
-        loss_A = torch.mean(((A - A0) / (A0.abs() + 1e-2)) ** 2)
-
-        total += p_loss + c_weight * c_loss + a_weight * loss_A
+        total += p_loss + c_weight * c_loss + a_weight
         p_total += p_loss
         c_total += c_loss
 
@@ -260,24 +225,6 @@ def train(epochs_pretrain: int,
         pbar.set_postfix(p_loss=f"{p_loss_val:.4e}", c_loss=f"{c_loss_val:.4e}",
                           lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
-    # ------------------------------------------------------------
-    # Fase 2: training principale, p_loss + c_weight*c_loss, curriculum esteso
-    # ------------------------------------------------------------
-    # total_t_max sale fino a 80 (non piu' 30): con la base di direzione gia'
-    # solida dal pretraining, possiamo permetterci rollout piu' lunghi senza
-    # ripartire da una direzione rumorosa.
-    #
-    # c_weight sale fino a 1/2 (non piu' 1/5) e viene scalato anche in base a
-    # quanto e' lungo il rollout dell'epoca corrente: sui rollout piu' lunghi
-    # (dove la deriva di fase secolare pesa di piu') la conservazione conta
-    # relativamente di piu', spingendo la rete a restare fisicamente coerente
-    # anche oltre l'orizzonte breve.
-    # Il curriculum deve arrivare all'orizzonte massimo con margine sufficiente
-    # PRIMA della fine di epochs_main, cosi' resta abbastanza training a rollout
-    # lungo (non solo l'istante in cui lo si raggiunge). Il denominatore e' ora
-    # derivato da epochs_main invece che fisso, cosi' i due non possono
-    # disallinearsi come e' successo con epochs_main=2000 e ramp fisso a //40
-    # (che raggiungeva total_t_max=80 solo a epoca ~3160, mai vista qui).
     max_horizon = 80
     ramp_fraction = 0.5  # il curriculum arriva al massimo entro il 50% di epochs_main
     ramp_denom = max(1, int(epochs_main * ramp_fraction / max_horizon))
@@ -289,10 +236,6 @@ def train(epochs_pretrain: int,
     for i in pbar:
         total_t_max = min(max_horizon, 1 + i // ramp_denom)
 
-        # c_weight non e' piu' scalato dalla lunghezza del rollout corrente:
-        # quello scaling penalizzava proprio la fase in cui total_t_max era
-        # ancora sotto 30, riducendo il vincolo di conservazione quando invece
-        # avrebbe dovuto restare quello (gia' validato) della ricetta precedente.
         c_weight = min(i / 100, 1) / 2
 
         result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,

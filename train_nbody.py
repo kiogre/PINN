@@ -244,25 +244,7 @@ def train(epochs_pretrain: int,
 
 
 def generate_instance(batch_size, n_obj, device=torch.device('cpu'), dtype=torch.float64, G=1.0):
-    """Generatore per N corpi. A differenza della versione a 2 corpi (orbite
-    Kepleriane esatte via formule chiuse), qui non esiste un modo altrettanto
-    semplice di generare condizioni iniziali fisicamente "pulite" per N>=3
-    generico -- e' un'euristica, non una distribuzione calibrata:
 
-    - Ogni corpo k viene posto su un "guscio" a raggio crescente (~k+1, con
-      jitter) e angolo casuale indipendente, per ridurre (non eliminare) la
-      probabilita' di incontri ravvicinati gia' nelle condizioni iniziali.
-    - La velocita' di ogni corpo e' approssimativamente tangenziale rispetto
-      al proprio raggio, scalata su una velocita' "circolare" locale stimata
-      con la massa totale del sistema (una stima grossolana, non una vera
-      soluzione di equilibrio a N corpi).
-    - Si impone poi CoM in (0,0) e momento totale nullo (quest'ultimo non e'
-      gestito da canonicalize_translation, che tocca solo le posizioni).
-
-    Se osservi molte epoche con loss non finita in training, il sospetto
-    principale e' incontri ravvicinati generati qui: riduci il jitter
-    angolare/radiale o aggiungi un rigetto esplicito su distanza minima.
-    """
     m = torch.rand(batch_size, n_obj, 1, device=device, dtype=dtype) * 1.5 + 0.5  # [B, N, 1]
     M_tot = torch.sum(m, dim=1, keepdim=True)  # [B, 1, 1]
 
