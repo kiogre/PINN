@@ -140,7 +140,6 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
     total = 0
     p_total = 0
     c_total = 0
-    #a_total = 0
     current_input = generate_instance(batch_size, device, dtype=dtype)
     initial = current_input.clone()  # riferimento fisso per la conservation loss
 
@@ -198,16 +197,14 @@ def train(epochs_pretrain: int,
 
     Fase 2 (principale, epochs_main epoche): loss = p_loss + c_weight*c_loss,
     con c_weight che cresce gradualmente da 0 e curriculum su total_t che
-    allunga il rollout fino a 30 step. Qui la rete, gia' partita da una dinamica
+    allunga il rollout fino a 80 step. Qui la rete, gia' partita da una dinamica
     di base corretta, viene raffinata per rispettare anche la conservazione e
     per restare stabile su rollout piu' lunghi.
     """
 
     loss_history, p_loss_history, c_loss_history = [], [], []
 
-    # ------------------------------------------------------------
-    # Fase 1: pretraining, solo p_loss, rollout corto
-    # ------------------------------------------------------------
+    # Pretraining, solo p_loss, rollout corto
     pbar = tqdm(range(epochs_pretrain), desc="Pretraining (solo p_loss)")
     for i in pbar:
         total_t_max = min(5, 1 + i // 200)
@@ -229,7 +226,6 @@ def train(epochs_pretrain: int,
     ramp_fraction = 0.5  # il curriculum arriva al massimo entro il 50% di epochs_main
     ramp_denom = max(1, int(epochs_main * ramp_fraction / max_horizon))
 
-    #a_weight = 0.0
     a_weight = 0.5
 
     pbar = tqdm(range(epochs_main), desc="Training principale")
@@ -258,12 +254,12 @@ def generate_instance(batch_size=256,
                       device=torch.device('cpu'),
                       dtype=torch.float64,
                       G=1.0):
-    # 1. Masse
+    # Masse
     m1 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.5
     m2 = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.5
     M_tot = m1 + m2
 
-    # 2. Distanza casuale r e angolo theta casuale (in tutto il piano, [0, 2*pi))
+    # Distanza casuale r e angolo theta casuale (in tutto il piano, [0, 2*pi))
     dist = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 + 0.5
     theta = torch.rand(batch_size, 1, device=device, dtype=dtype) * 2.0 * np.pi
 
@@ -280,7 +276,7 @@ def generate_instance(batch_size=256,
     x2 =  (m1 / M_tot) * rx
     y2 =  (m1 / M_tot) * ry
 
-    # 3. Velocità orbitali
+    # Velocità orbitali
     v_circ = torch.sqrt(G * M_tot / dist)
     v_factor = torch.rand(batch_size, 1, device=device, dtype=dtype) * 1.5 + 0.3
     v_tangential = v_circ * v_factor

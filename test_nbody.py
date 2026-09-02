@@ -28,9 +28,7 @@ def compute_momentum(states):
     return torch.sum(m * v, dim=1)  # [B, 2]
 
 
-# ============================================================
 # Animazione (generalizzata a N corpi con color cycle)
-# ============================================================
 
 def animate_trajectory(traj_net, traj_solver, n_obj, interval=30, save_path=None):
     fig, ax = plt.subplots(figsize=(7, 7))
@@ -86,9 +84,7 @@ def animate_trajectory(traj_net, traj_solver, n_obj, interval=30, save_path=None
     return anim
 
 
-# ============================================================
 # Solver di riferimento (N corpi generico)
-# ============================================================
 
 def n_body_rhs(t, state, masses, G=1.0, eps=1e-3):
     """state = [pos_flat(2N), vel_flat(2N)] -> dstate/dt nello stesso formato."""
@@ -180,10 +176,7 @@ def test(BodyNetwork, n_obj, device=torch.device("cpu"), rollout_steps=30, dt=0.
         "n_obj": n_obj,
     }
 
-
-# ============================================================
 # Errore rete-vs-solver, step per step (per ciascun corpo)
-# ============================================================
 
 def compute_stepwise_error(results):
     traj_net, traj_solver, n_obj = results["traj_net"], results["traj_solver"], results["n_obj"]
@@ -206,9 +199,7 @@ def compute_stepwise_error(results):
     }
 
 
-# ============================================================
 # Diagnostica di DIREZIONE al primo step (generalizzata a N corpi)
-# ============================================================
 def direction_diagnostic(BodyNetwork, n_obj, device, dt, n_samples=200, eps=1e-3, G=1.0, dtype=torch.float64):
     BodyNetwork.eval()
     angles = [[] for _ in range(n_obj)]
@@ -253,10 +244,7 @@ def direction_diagnostic(BodyNetwork, n_obj, device, dt, n_samples=200, eps=1e-3
         "n_obj": n_obj,
     }
 
-
-# ============================================================
 # Plot diagnostici (generalizzati a N corpi)
-# ============================================================
 
 def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
     n_obj = results["n_obj"]
@@ -302,10 +290,6 @@ def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
 
     plt.close("all")
 
-
-# ============================================================
-# Main
-# ============================================================
 
 if __name__ == "__main__":
 

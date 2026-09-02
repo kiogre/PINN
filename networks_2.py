@@ -195,19 +195,19 @@ class Acceleration2BodyNetv5(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato intermedio per calcolare l'accelerazione futura
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output nello stesso formato di input [B, 10]

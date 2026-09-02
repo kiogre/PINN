@@ -99,10 +99,10 @@ def physics_loss_2_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net
         v_out = output_state.view(B, 2, 5)[:, :, 3:5]
         a_pred = (v_out - v_in) / dt
 
-    # 1. Standard PINN Loss (Residual)
+    # Standard PINN Loss (Residual)
     loss_res = F.smooth_l1_loss(a_pred, a_target, beta=1e-2)
 
-    # 2. Gradient-enhanced (g-PINN) Component
+    # Gradient-enhanced (g-PINN) Component
     # Derivata analitica di a_target rispetto a p1 e p2 (via r12)
     # da/dr = G*m * (I / |r|^3 - 3 * r (r^T) / |r|^5)
     I = torch.eye(2, device=input_state.device, dtype=input_state.dtype).unsqueeze(0) # [1, 2, 2]

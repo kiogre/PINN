@@ -47,7 +47,7 @@ class PermutationInvariantGate(nn.Module):
         super().__init__()
         self.num_channels = num_channels
         
-        # 1. Block per elaborare [norme_corpo1, norme_corpo2] mantenendo la simmetria S_2
+        # Block per elaborare [norme_corpo1, norme_corpo2] mantenendo la simmetria S_2
         self.ab1 = AB_Block(in_feature=2 * num_channels + 2, out_feature=2 * hidden, dtype=dtype, device=device)
         self.ab2 = AB_Block(in_feature=2 * hidden, out_feature=2 * num_channels, dtype=dtype, device=device)
         self.act = nn.SiLU()
@@ -143,19 +143,19 @@ class Acceleration2BodyNet(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato intermedio per calcolare l'accelerazione futura
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output nello stesso formato di input [B, 10]
@@ -237,19 +237,19 @@ class NBodyAccelerationNet(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato temporaneo per calcolare la nuova accelerazione
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output [B, N * 5]
@@ -352,19 +352,19 @@ class Acceleration2BodyNetv2(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato intermedio per calcolare l'accelerazione futura
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output nello stesso formato di input [B, 10]
@@ -439,19 +439,19 @@ class Acceleration2BodyNetv3(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato intermedio per calcolare l'accelerazione futura
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output nello stesso formato di input [B, 10]
@@ -526,19 +526,19 @@ class Acceleration2BodyNetv4(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione al tempo t: a_t
+        # Accelerazione al tempo t: a_t
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
+        # Aggiornamento posizione: p(t+dt) = p(t) + v(t)*dt + 0.5*a(t)*dt^2
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato intermedio per calcolare l'accelerazione futura
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione al tempo t+dt: a_{t+dt}
+        # Accelerazione al tempo t+dt: a_{t+dt}
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
+        # Aggiornamento velocità: v(t+dt) = v(t) + 0.5*(a_t + a_{t+dt})*dt
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         # Ricostruzione output nello stesso formato di input [B, 10]
@@ -685,19 +685,19 @@ class AccelerationNBodyNetv4(nn.Module):
         p = x_r[:, :, 1:3]
         v = x_r[:, :, 3:5]
 
-        # 1. Accelerazione a(t)
+        # Accelerazione a(t)
         a_t = self.predict_acceleration(x)
 
-        # 2. Aggiornamento posizione p(t+dt)
+        # Aggiornamento posizione p(t+dt)
         p_next = p + v * dt + 0.5 * a_t * (dt ** 2)
 
         # Stato temporaneo
         state_temp = torch.cat([m, p_next, v], dim=-1).view(B, -1)
 
-        # 3. Accelerazione a(t+dt)
+        # Accelerazione a(t+dt)
         a_next = self.predict_acceleration(state_temp)
 
-        # 4. Aggiornamento velocità v(t+dt)
+        # Aggiornamento velocità v(t+dt)
         v_next = v + 0.5 * (a_t + a_next) * dt
 
         out_r = torch.cat([m, p_next, v_next], dim=-1)

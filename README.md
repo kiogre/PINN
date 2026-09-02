@@ -11,8 +11,12 @@ We aim to create a PINN such that it evaluates all possible 2-body motions, not 
 
 Another very interesting aspect is to see if the PINN for the 2-body problem is doing an approximation of a known solution for the 2-body problem (also known as the [action-angle variables](https://en.wikipedia.org/wiki/Action-angle_coordinates)).
 
-## Possible other implementations
+## Possible other implementations/questions
 
 - Start the training for the N body problem from the 2 body problem and see if beginning from that point improves the network
 - if the mass of a single body is 0 in the 2 body problem, all of the accceleration should become (0,0). Does it happen? Should we create the network such that this is always assured?
 - If the mass of a single body is 0 in the 3 body problem, it should behave exactly like the 2 body problem. Can we make it work? Should we start by multiplying the input by the mass?
+
+## First annotation of one of the questions
+
+If we consider the model of the 2 body problem and we proceed to set one of the 2 masses to 0, the body that doesn't have the null mass have effectly 0 acceleration and continue with a uniform rectilinear motion. The test shows the "trajectory of the null body", with an error of position, even if it doesn't exists but it isn't the important part.
