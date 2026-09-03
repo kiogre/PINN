@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from networks import AccelerationNBodyNetv4
+from networks_2 import AccelerationNBodyNetv5
 import random
 from tqdm import tqdm
 
@@ -320,9 +321,10 @@ def train_network(DEVICE: torch.device = torch.device('cpu'), n_body: int = 3):
     g_weight = 0.1 # Peso g-PINN
     dtype = torch.float64
 
-    BodyNetwork = AccelerationNBodyNetv4(
+    BodyNetwork = AccelerationNBodyNetv5(
         n_obj=n_body,
         num_blocks=n_blocks,
+        r_dim=2,
         dtype=dtype,
         device=DEVICE
     ).to(DEVICE)
@@ -355,7 +357,7 @@ if __name__ == "__main__":
     print("=" * 90)
 
     N_BODY = 3
-    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc.pt"
+    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v5.pt"
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)

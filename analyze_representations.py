@@ -81,6 +81,11 @@ try:
 except ImportError:
     tnb = None
 
+try:
+    from networks_2 import AccelerationNBodyNetv5
+except ImportError:
+    AccelerationNBodyNetv5 = None
+
 
 def _generate_states(n, n_obj, device, dtype, G=1.0):
     """Wrapper unico per generare stati iniziali, 2 corpi o N corpi."""
@@ -162,6 +167,76 @@ def _r_ij_inv_sq(p, eps=1e-4):
 
 
 def extract_layer_activations(net, state, n_obj):
+    B = state.shape[0]
+    N = n_obj
+    x_r = state.view(B, N, 5)
+    m = x_r[:, :, 0:1]
+    p = x_r[:, :, 1:3]
+    v = x_r[:, :, 3:5]
+
+    activations = []
+
+    # 1. Rete 2-corpi v5 (gate condizionati su m e r_ij scalare)
+    if n_obj == 2 and hasattr(net, "gates2"):
+        vecs = torch.stack([p, v], dim=2)  # [B, 2, C, 2]
+        r_ij = _r_ij_inv_sq(p)
+        out = vecs
+        for layer, gate2, gate in zip(net.layers[:-1], net.gates2, net.gates):
+            out = layer(out)
+            out = gate2(out, m, r_ij)
+            out = gate(out, m, r_ij)
+            activations.append(out.detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.detach().clone())
+
+    # 2. Rete 2-corpi v2-v4 (singolo gate su m)
+    elif n_obj == 2 and hasattr(net, "gates"):
+        vecs = torch.stack([p, v], dim=2)
+        out = vecs
+        for layer, gate in zip(net.layers[:-1], net.gates):
+            out = layer(out)
+            out = gate(out, m)
+            activations.append(out.detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.detach().clone())
+
+    # 3. Nuova rete N-corpi v5 (gate condizionati su m e r_features aggregate)
+    elif hasattr(net, "gates_inv") and hasattr(net, "_compute_r_features"):
+        vecs = torch.stack([p, v], dim=-1)  # [B, N, 2, 2]
+        r_feats = net._compute_r_features(p, m)
+        out = vecs
+        for layer, g_inv, g_rot in zip(net.layers[:-1], net.gates_inv, net.gates_rot):
+            out = layer(out)
+            out = g_inv(out, m, r_feats)
+            out = g_rot(out, m, r_feats)
+            activations.append(out.transpose(-1, -2).detach().clone())  # -> [B, N, C, 2]
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    # 4. Rete N-corpi v4 (gates_inv e gates_rot senza distanze r)
+    elif hasattr(net, "gates_inv"):
+        vecs = torch.stack([p, v], dim=-1)
+        out = vecs
+        for layer, g_inv, g_rot in zip(net.layers[:-1], net.gates_inv, net.gates_rot):
+            out = layer(out)
+            out = g_inv(out, m)
+            out = g_rot(out, m)
+            activations.append(out.transpose(-1, -2).detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    # 5. Vecchia NBodyAccelerationNet senza gate (solo SiLU)
+    else:
+        vecs = torch.stack([p, v], dim=-1)
+        out = vecs
+        for layer in net.layers[:-1]:
+            out = layer(out)
+            out = F.silu(out)
+            activations.append(out.transpose(-1, -2).detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    return activations
     """Ritorna una lista di tensori [B, N, C, 2], indipendentemente
     dall'architettura. Replica ESATTAMENTE l'ordine di operazioni del
     forward/predict_acceleration reale di ciascuna rete -- e' il pezzo
@@ -768,9 +843,14 @@ if __name__ == "__main__":
             net_ = cls(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
             ctor_ = lambda: cls(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
         else:
-            assert AccelerationNBodyNetv4 is not None, "AccelerationNBodyNetv4 non trovata in networks.py"
-            net_ = AccelerationNBodyNetv4(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
-            ctor_ = lambda: AccelerationNBodyNetv4(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            if arch == "v5":
+                assert AccelerationNBodyNetv5 is not None, "AccelerationNBodyNetv5 non trovata in networks_2.py"
+                cls = AccelerationNBodyNetv5
+            else:
+                assert AccelerationNBodyNetv4 is not None, "AccelerationNBodyNetv4 non trovata in networks.py"
+                cls = AccelerationNBodyNetv4
+            net_ = cls(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            ctor_ = lambda: cls(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
         return net_, ctor_
 
     net, net_random_ctor = build_net(args.n_obj)
