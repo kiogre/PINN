@@ -1,12 +1,20 @@
 """
 Analisi di cosa la rete rappresenta internamente, generalizzata per
-funzionare sia su Acceleration2BodyNet (2 corpi, AB_Block) sia su
-NBodyAccelerationNet (N corpi, NBodyPermutationBlock).
+funzionare su Acceleration2BodyNet (v2-v4, AB_Block, gate condizionato solo
+sulla massa), Acceleration2BodyNetv5 (gate doppio condizionato anche su
+r_ij), e NBodyAccelerationNet (N corpi, NBodyPermutationBlock).
 
-Quattro probe (i probe [3] e [4] restano specifici del 2-corpi: si basano
-su elementi orbitali Kepleriani -- periodo, anomalia media -- che non
-esistono in generale per N>=3, dove il problema e' tipicamente caotico
+Probe disponibili (i probe [3] e [4] restano specifici del 2-corpi: si
+basano su elementi orbitali Kepleriani -- periodo, anomalia media -- che
+non esistono in generale per N>=3, dove il problema e' tipicamente caotico
 e non-integrabile):
+
+  0. Self-check di equivarianza SO(2) dell'estrazione delle attivazioni.
+     Va eseguito PRIMA di fidarsi di ogni altro probe: se extract_layer_
+     activations non rispecchia esattamente il forward pass reale (es.
+     nuova architettura non ancora gestita, o gate applicato con ordine/
+     argomenti sbagliati), i probe [2],[5],[6],[8] -- che assumono norme e
+     angoli relativi invarianti -- danno risultati silenziosamente falsi.
 
   1. Decomposizione simmetrica/antisimmetrica di ogni blocco di mixing
      (AB_Block per N=2, NBodyPermutationBlock per N generico), con
@@ -15,10 +23,26 @@ e non-integrabile):
   2. Probing lineare: norme dei canali per layer -> quantita' conservate
      (energia, |momento angolare|, e per N=2 anche eccentricita').
 
-  3. Probe angolare per canale singolo (solo N=2).
+  3. Probe angolare per canale singolo, fase assoluta vs moto medio atteso
+     (solo N=2; soffre della non-linearita' dell'equazione di Keplero per
+     orbite eccentriche -- vedi probe [8] per un'alternativa invariante).
 
   4. Decodifica lineare globale dell'angolo, con estrapolazione temporale
      (solo N=2).
+
+  5. Dimensione intrinseca (Two-NN) per layer, su feature invarianti
+     (norme + angoli relativi canale-vs-r_01).
+
+  6. Neighborhood overlap rappresentazione vs quantita' fisiche, sulle
+     stesse feature invarianti del probe [5].
+
+  7. Confronto diretto dei parametri self/other tra reti a N diverso.
+
+  8. Probe dell'angolo relativo (canale vs r_01), invariante punto per
+     punto: confrontato direttamente con l'anomalia vera istantanea
+     (nessuna assunzione di crescita lineare nel tempo, quindi non soffre
+     del problema Kepleriano del probe [3]). Solo N=2 per il confronto col
+     ground truth; per N>=3 non esiste un target Kepleriano di riferimento.
 
 Uso:
     python analyze_representations.py --checkpoint <path> --n_obj 2
@@ -26,6 +50,8 @@ Uso:
 """
 
 import argparse
+from collections import Counter
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -41,6 +67,11 @@ except ImportError:
     Acceleration2BodyNet = None
 
 try:
+    from networks_2 import Acceleration2BodyNetv5
+except ImportError:
+    Acceleration2BodyNetv5 = None
+
+try:
     from networks import AccelerationNBodyNetv4
 except ImportError:
     AccelerationNBodyNetv4 = None
@@ -49,6 +80,19 @@ try:
     import train_nbody as tnb
 except ImportError:
     tnb = None
+
+try:
+    from networks_2 import AccelerationNBodyNetv5
+except ImportError:
+    AccelerationNBodyNetv5 = None
+
+
+def _generate_states(n, n_obj, device, dtype, G=1.0):
+    """Wrapper unico per generare stati iniziali, 2 corpi o N corpi."""
+    if n_obj == 2:
+        return generate_instance_2body(n, device, dtype=dtype, G=G)
+    assert tnb is not None, "train_nbody.py non trovato: serve per generate_instance a N corpi"
+    return tnb.generate_instance(n, n_obj, device, dtype=dtype, G=G)
 
 
 # ----------------------------------------------------------------------
@@ -116,9 +160,13 @@ def report_symmetric_antisymmetric(net, net_random_ctor, n_obj, n_random_seeds=5
 # ----------------------------------------------------------------------
 # Estrazione delle attivazioni intermedie, unificata a [B, N, C, 2]
 # ----------------------------------------------------------------------
+def _r_ij_inv_sq(p, eps=1e-4):
+    """1/(r_01^2 + eps), stesso identico calcolo di predict_acceleration
+    in Acceleration2BodyNetv5 -- deve restare sincronizzato con quello."""
+    return 1.0 / (torch.sum((p[:, 0] - p[:, 1]) ** 2, dim=-1, keepdim=True) + eps)
+
+
 def extract_layer_activations(net, state, n_obj):
-    """Ritorna una lista di tensori [B, N, C, 2] (norma sull'ultimo asse
-    per ottenere invarianti), indipendentemente dall'architettura."""
     B = state.shape[0]
     N = n_obj
     x_r = state.view(B, N, 5)
@@ -128,9 +176,22 @@ def extract_layer_activations(net, state, n_obj):
 
     activations = []
 
-    if n_obj == 2 and hasattr(net, "gates"):
-        # Acceleration2BodyNet: vecs = [B, 2, 2, 2] (canale prima delle coordinate x/y)
-        vecs = torch.stack([p, v], dim=2)  # [B, 2, 2(canale p/v), 2(xy)]
+    # 1. Rete 2-corpi v5 (gate condizionati su m e r_ij scalare)
+    if n_obj == 2 and hasattr(net, "gates2"):
+        vecs = torch.stack([p, v], dim=2)  # [B, 2, C, 2]
+        r_ij = _r_ij_inv_sq(p)
+        out = vecs
+        for layer, gate2, gate in zip(net.layers[:-1], net.gates2, net.gates):
+            out = layer(out)
+            out = gate2(out, m, r_ij)
+            out = gate(out, m, r_ij)
+            activations.append(out.detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.detach().clone())
+
+    # 2. Rete 2-corpi v2-v4 (singolo gate su m)
+    elif n_obj == 2 and hasattr(net, "gates"):
+        vecs = torch.stack([p, v], dim=2)
         out = vecs
         for layer, gate in zip(net.layers[:-1], net.gates):
             out = layer(out)
@@ -138,8 +199,92 @@ def extract_layer_activations(net, state, n_obj):
             activations.append(out.detach().clone())
         out = net.layers[-1](out)
         activations.append(out.detach().clone())
+
+    # 3. Nuova rete N-corpi v5 (gate condizionati su m e r_features aggregate)
+    elif hasattr(net, "gates_inv") and hasattr(net, "_compute_r_features"):
+        vecs = torch.stack([p, v], dim=-1)  # [B, N, 2, 2]
+        r_feats = net._compute_r_features(p, m)
+        out = vecs
+        for layer, g_inv, g_rot in zip(net.layers[:-1], net.gates_inv, net.gates_rot):
+            out = layer(out)
+            out = g_inv(out, m, r_feats)
+            out = g_rot(out, m, r_feats)
+            activations.append(out.transpose(-1, -2).detach().clone())  # -> [B, N, C, 2]
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    # 4. Rete N-corpi v4 (gates_inv e gates_rot senza distanze r)
+    elif hasattr(net, "gates_inv"):
+        vecs = torch.stack([p, v], dim=-1)
+        out = vecs
+        for layer, g_inv, g_rot in zip(net.layers[:-1], net.gates_inv, net.gates_rot):
+            out = layer(out)
+            out = g_inv(out, m)
+            out = g_rot(out, m)
+            activations.append(out.transpose(-1, -2).detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    # 5. Vecchia NBodyAccelerationNet senza gate (solo SiLU)
     else:
-        # NBodyAccelerationNet: vecs = [B, N, 2(xy), C], niente gate, solo SiLU
+        vecs = torch.stack([p, v], dim=-1)
+        out = vecs
+        for layer in net.layers[:-1]:
+            out = layer(out)
+            out = F.silu(out)
+            activations.append(out.transpose(-1, -2).detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.transpose(-1, -2).detach().clone())
+
+    return activations
+    """Ritorna una lista di tensori [B, N, C, 2], indipendentemente
+    dall'architettura. Replica ESATTAMENTE l'ordine di operazioni del
+    forward/predict_acceleration reale di ciascuna rete -- e' il pezzo
+    piu' delicato dello script: se non rispecchia il forward vero, tutti
+    i probe a valle (che assumono norme/angoli invarianti) sono silenziosamente
+    sbagliati. Usare probe [0] per verificarlo empiricamente dopo ogni
+    modifica qui o ogni nuova architettura aggiunta."""
+    B = state.shape[0]
+    N = n_obj
+    x_r = state.view(B, N, 5)
+    m = x_r[:, :, 0:1]
+    p = x_r[:, :, 1:3]
+    v = x_r[:, :, 3:5]
+
+    activations = []
+
+    if n_obj == 2 and hasattr(net, "gates2"):
+        # Acceleration2BodyNetv5: layer -> gate invariante (gates2, scala) ->
+        # gate di rotazione (gates), entrambi condizionati su m e su r_ij.
+        vecs = torch.stack([p, v], dim=2)  # [B, 2, 2(canale p/v), 2(xy)]
+        r_ij = _r_ij_inv_sq(p)
+        out = vecs
+        for layer, gate2, gate in zip(net.layers[:-1], net.gates2, net.gates):
+            out = layer(out)
+            out = gate2(out, m, r_ij)
+            out = gate(out, m, r_ij)
+            activations.append(out.detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.detach().clone())
+
+    elif n_obj == 2 and hasattr(net, "gates"):
+        # Acceleration2BodyNet (v2-v4): singolo gate condizionato solo su m.
+        vecs = torch.stack([p, v], dim=2)
+        out = vecs
+        for layer, gate in zip(net.layers[:-1], net.gates):
+            out = layer(out)
+            out = gate(out, m)
+            activations.append(out.detach().clone())
+        out = net.layers[-1](out)
+        activations.append(out.detach().clone())
+
+    else:
+        # NBodyAccelerationNet: vecs = [B, N, 2(xy), C], niente gate, solo SiLU.
+        # ATTENZIONE: SiLU applicata elemento per elemento sulle componenti x,y
+        # grezze non e' equivariante SO(2) in generale -- se probe [0] segnala
+        # errore qui, la rete vera probabilmente non passa da questo branch
+        # cosi' com'e' (es. usa un gate norm-based non replicato in questa
+        # funzione) e va corretta prima di fidarsi di [2],[5],[6],[8].
         vecs = torch.stack([p, v], dim=-1)  # [B, N, 2, 2(canale p/v)]
         out = vecs
         for layer in net.layers[:-1]:
@@ -150,6 +295,76 @@ def extract_layer_activations(net, state, n_obj):
         activations.append(out.transpose(-1, -2).detach().clone())
 
     return activations
+
+
+# ----------------------------------------------------------------------
+# 0. Self-check di equivarianza SO(2) dell'estrazione
+# ----------------------------------------------------------------------
+def check_equivariance(net, device, dtype, n_obj, n_traj=8, seed=123, theta_val=0.7):
+    """Ruota lo stato di un angolo fisso e confronta le attivazioni estratte
+    con le attivazioni originali ruotate della stessa quantita'. Se
+    extract_layer_activations rispecchia il vero forward pass equivariante,
+    lo scarto deve essere a precisione numerica (~1e-14/1e-6 a seconda del
+    dtype), esattamente come gia' verificato per la rete intera. Se non lo
+    e', i probe successivi basati su norme/angoli invarianti NON sono validi."""
+    print(f"\n[0] Self-check equivarianza SO(2) dell'estrazione (N={n_obj})")
+    torch.manual_seed(seed)
+    state = _generate_states(n_traj, n_obj, device, dtype, G=1.0)
+
+    theta = torch.tensor(theta_val, dtype=dtype, device=device)
+    c, s = torch.cos(theta), torch.sin(theta)
+    R = torch.stack([torch.stack([c, -s]), torch.stack([s, c])]).to(dtype=dtype, device=device)
+
+    B = state.shape[0]
+    x_r = state.view(B, n_obj, 5)
+    m, p, v = x_r[:, :, 0:1], x_r[:, :, 1:3], x_r[:, :, 3:5]
+    p_rot = p @ R.T
+    v_rot = v @ R.T
+    state_rot = torch.cat([m, p_rot, v_rot], dim=-1).view(B, -1)
+
+    acts_orig = extract_layer_activations(net, state, n_obj)
+    acts_rot = extract_layer_activations(net, state_rot, n_obj)
+
+    max_err = 0.0
+    for li, (a0, a1) in enumerate(zip(acts_orig, acts_rot)):
+        a0_rot = a0 @ R.T  # ruota le componenti x,y delle attivazioni originali
+        err = (a0_rot - a1).abs().max().item()
+        max_err = max(max_err, err)
+        print(f"    layer {li}: errore max |R@act(x) - act(R@x)| = {err:.3e}")
+
+    if max_err < 1e-6:
+        print("    OK: estrazione equivariante a precisione numerica -- probe [2],[5],[6],[8] validi.")
+    else:
+        print("    !!! ATTENZIONE: estrazione NON equivariante -- probe [2],[5],[6],[8] "
+              "NON sono affidabili cosi' come sono. Correggere extract_layer_activations "
+              "prima di interpretare i risultati sotto.")
+    return max_err
+
+
+# ----------------------------------------------------------------------
+# Angolo relativo tra vettori 2D, invariante SO(2) punto per punto
+# ----------------------------------------------------------------------
+def _relative_angle(u, v):
+    """Angolo con segno tra u e v (ultimo asse = x,y), via atan2(cross, dot).
+    A differenza dell'angolo assoluto di un canale, e' invariante per
+    rotazioni globali: ruotare u e v della stessa quantita' non lo cambia.
+    Supporta il broadcasting standard di torch tra le shape di u e v."""
+    cross = u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+    dot = (u * v).sum(-1)
+    return torch.atan2(cross, dot)
+
+
+def _invariant_features(act, r_ref):
+    """Feature invarianti a rotazione per un singolo layer: norme dei canali
+    + coseno/seno dell'angolo di ogni canale rispetto a r_ref (posizione
+    relativa corpo1-corpo0). Le norme da sole catturano solo le quantita'
+    scalari conservate (energia, |L|, eccentricita'); l'angolo aggiunge la
+    fase/orientazione orbitale, che e' invariante ma non e' una norma."""
+    n = act.shape[0]
+    norms = torch.norm(act, dim=-1).reshape(n, -1)
+    ang = _relative_angle(act, r_ref)  # broadcasting: r_ref e' [B,1,1,2]
+    feats = torch.cat([norms, torch.cos(ang).reshape(n, -1), torch.sin(ang).reshape(n, -1)], dim=-1)
+    return feats.cpu().numpy()
 
 
 # ----------------------------------------------------------------------
@@ -410,25 +625,24 @@ def _two_nn_id(X, discard_fraction=0.1):
 
 
 def probe_intrinsic_dimension(net, device, dtype, n_obj, n_traj=2000, G=1.0):
-    """Dimensione intrinseca delle rappresentazioni per layer, usando le
-    NORME dei canali (non i vettori grezzi x,y): le norme sono invarianti
-    per rotazione, quindi la stima riflette gradi di liberta' fisici veri
-    (es. energia, momento angolare, fase) e non il grado di liberta' banale
-    dell'orientazione globale casuale del sample (che gonfierebbe l'ID di
-    circa +1 senza motivo fisico se si usassero le componenti x,y grezze)."""
+    """Dimensione intrinseca delle rappresentazioni per layer, su feature
+    invarianti (norme + angoli relativi, vedi _invariant_features): usare
+    solo le norme sottostimerebbe l'ID di almeno 1 dimensione per traiettoria,
+    perche' la fase/orientazione orbitale e' invariante a rotazione ma non e'
+    una norma. Le componenti x,y grezze invece gonfierebbero l'ID di +1 per
+    l'orientazione globale arbitraria del sample, che non e' un grado di
+    liberta' fisico."""
     print(f"\n[5] Dimensione intrinseca (Two-NN) per layer (N={n_obj})")
-    if n_obj == 2:
-        states = generate_instance_2body(n_traj, device, dtype=dtype, G=G)
-    else:
-        states = tnb.generate_instance(n_traj, n_obj, device, dtype=dtype, G=G)
+    states = _generate_states(n_traj, n_obj, device, dtype, G=G)
+    x_r = states.view(n_traj, n_obj, 5)
+    r_ref = (x_r[:, 1, 1:3] - x_r[:, 0, 1:3]).unsqueeze(1).unsqueeze(1)  # [n_traj,1,1,2]
 
     activations = extract_layer_activations(net, states, n_obj)
     for li, act in enumerate(activations):
-        norms = torch.norm(act, dim=-1)
-        feats = norms.reshape(n_traj, -1).cpu().numpy()
+        feats = _invariant_features(act, r_ref)
         try:
             d_hat = _two_nn_id(feats)
-        except Exception as e:
+        except Exception:
             d_hat = float('nan')
         print(f"    layer {li}: dimensione embedding={feats.shape[1]:4d}   ID stimata (Two-NN)={d_hat:.2f}")
 
@@ -457,22 +671,23 @@ def _neighborhood_overlap(feats, target, k=10):
 
 def probe_neighborhood_overlap(net, device, dtype, n_obj, n_traj=1000, G=1.0, k=10):
     print(f"\n[6] Neighborhood overlap (k={k}) rappresentazione vs quantita' fisiche (N={n_obj})")
+    states = _generate_states(n_traj, n_obj, device, dtype, G=G)
     if n_obj == 2:
-        states = generate_instance_2body(n_traj, device, dtype=dtype, G=G)
         elems = orbital_elements(states, G=G)
         targets = {"energia": elems["energy"].cpu().numpy(),
                    "|momento angolare|": elems["h"].abs().cpu().numpy(),
                    "eccentricita'": elems["e"].cpu().numpy()}
     else:
-        states = tnb.generate_instance(n_traj, n_obj, device, dtype=dtype, G=G)
         targets = {"energia": tnb.compute_energy(states, G=G).cpu().numpy(),
                    "|momento angolare|": tnb.compute_angular_momentum(states).abs().cpu().numpy()}
+
+    x_r = states.view(n_traj, n_obj, 5)
+    r_ref = (x_r[:, 1, 1:3] - x_r[:, 0, 1:3]).unsqueeze(1).unsqueeze(1)
 
     activations = extract_layer_activations(net, states, n_obj)
     print(f"    (overlap atteso per caso puro ~ {k}/{n_traj:.0f} ~= {k/n_traj:.4f}; valori vicini a 1 = struttura forte)")
     for li, act in enumerate(activations):
-        norms = torch.norm(act, dim=-1)
-        feats = norms.reshape(n_traj, -1).cpu().numpy()
+        feats = _invariant_features(act, r_ref)
         parts = []
         for name, tgt in targets.items():
             no = _neighborhood_overlap(feats, tgt, k=k)
@@ -528,6 +743,79 @@ def compare_mixing_across_networks(net_a, n_obj_a, label_a, net_b, n_obj_b, labe
 
 
 # ----------------------------------------------------------------------
+# 8. Probe dell'angolo relativo (canale vs r_01), invariante punto per punto
+# ----------------------------------------------------------------------
+def probe_relative_angle_channels(net, device, dtype, n_obj, total_t=60, dt=0.01, G=1.0, n_trajectories=15):
+    """Alternativa al probe [3]: invece della fase ASSOLUTA di un canale
+    rispetto a un asse fisso arbitrario (valida solo assumendo crescita
+    lineare nel tempo, che fallisce per orbite eccentriche per via
+    dell'equazione di Keplero), guarda l'angolo RELATIVO tra ogni canale e
+    r_01(t) -- invariante SO(2) punto per punto, nessuna assunzione di
+    linearita'. Per N=2 lo confronta direttamente con l'anomalia vera
+    istantanea (calcolata dallo stato corrente, non estrapolata)."""
+    print(f"\n[8] Probe angolo relativo (canale vs r_01) su {n_trajectories} traiettorie (N={n_obj})")
+
+    if n_obj == 2:
+        candidates = generate_instance_2body(n_trajectories * 4, device, dtype=dtype, G=G)
+        elems0 = orbital_elements(candidates, G=G)
+        bound_idx = torch.nonzero(elems0["e"] < 1.0, as_tuple=True)[0]
+        if bound_idx.numel() < n_trajectories:
+            print(f"    Solo {bound_idx.numel()} orbite legate trovate, procedo con quelle disponibili.")
+        bound_idx = bound_idx[:n_trajectories].tolist()
+    else:
+        candidates = tnb.generate_instance(n_trajectories, n_obj, device, dtype=dtype, G=G)
+        bound_idx = list(range(n_trajectories))
+        print("    N>=3: nessun target Kepleriano di riferimento, riporto solo la variabilita' "
+              "dell'angolo relativo nel tempo (non un confronto con ground truth).")
+
+    results = []
+    for i in bound_idx:
+        state = candidates[i:i + 1].clone()
+        angle_hist = None
+        nu_hist = []
+        with torch.no_grad():
+            for _ in range(total_t):
+                x_r = state.view(1, n_obj, 5)
+                r_ref = (x_r[:, 1, 1:3] - x_r[:, 0, 1:3]).unsqueeze(1)  # [1,1,2]
+                acts = extract_layer_activations(net, state, n_obj)
+                if angle_hist is None:
+                    angle_hist = [[] for _ in acts]
+                for li, act in enumerate(acts):
+                    ang = _relative_angle(act[0, 0], r_ref[0])  # [C]
+                    angle_hist[li].append(ang.cpu().numpy())
+                if n_obj == 2:
+                    nu_hist.append(orbital_elements(state, G=G)["nu"].item())
+                state = net(state, dt)
+
+        if n_obj == 2:
+            nu_t = np.unwrap(np.array(nu_hist))
+            best = None
+            for li, hist in enumerate(angle_hist):
+                hist = np.unwrap(np.stack(hist, axis=0), axis=0)
+                for c in range(hist.shape[1]):
+                    diff = hist[:, c] - nu_t
+                    diff = diff - np.round(diff.mean() / (2 * np.pi)) * 2 * np.pi
+                    resid_std = diff.std()
+                    if best is None or resid_std < best[2]:
+                        best = (li, c, resid_std)
+            li, c, resid_std = best
+            e_i = elems0["e"][i].item()
+            print(f"    e={e_i:.3f}  -> layer {li}, canale {c}  "
+                  f"std(angolo_canale - anomalia_vera) = {resid_std:.4f} rad")
+            results.append((li, c, resid_std, e_i))
+
+    if n_obj == 2 and results:
+        winner_counts = Counter((li, c) for li, c, *_ in results)
+        top_winner, count = winner_counts.most_common(1)[0]
+        stds = [s for li, c, s, e in results if (li, c) == top_winner]
+        print(f"\n    Layer/canale piu' frequente: {top_winner}  ({count}/{len(results)} traiettorie)")
+        print(f"    std(angolo - nu_vera) su quelle traiettorie: "
+              f"mediana={np.median(stds):.4f}  max={np.max(stds):.4f} rad")
+        if count < len(results) * 0.5:
+            print("    ATTENZIONE: nessun canale vince in modo consistente.")
+
+
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
@@ -537,20 +825,32 @@ if __name__ == "__main__":
                          help="Secondo checkpoint opzionale (es. rete a 3 corpi) per il confronto [7]")
     parser.add_argument("--n_obj2", type=int, default=None,
                          help="n_obj del secondo checkpoint (richiesto se --checkpoint2 e' passato)")
+    parser.add_argument("--arch", type=str, default="v5", choices=["v4", "v5"],
+                         help="Versione dell'architettura 2-corpi da istanziare (ignorato per n_obj>2)")
     args = parser.parse_args()
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     DTYPE = torch.float64
 
-    def build_net(n_obj):
+    def build_net(n_obj, arch=args.arch):
         if n_obj == 2:
-            assert Acceleration2BodyNetv4 is not None, "Acceleration2BodyNet non trovata in networks.py"
-            net_ = Acceleration2BodyNetv4(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
-            ctor_ = lambda: Acceleration2BodyNetv4(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            if arch == "v5":
+                assert Acceleration2BodyNetv5 is not None, "Acceleration2BodyNetv5 non trovata in networks_2.py"
+                cls = Acceleration2BodyNetv5
+            else:
+                assert Acceleration2BodyNetv4 is not None, "Acceleration2BodyNetv4 non trovata in networks.py"
+                cls = Acceleration2BodyNetv4
+            net_ = cls(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            ctor_ = lambda: cls(num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
         else:
-            assert AccelerationNBodyNetv4 is not None, "AccelerationNBodyNetv4 non trovata in networks.py"
-            net_ = AccelerationNBodyNetv4(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
-            ctor_ = lambda: AccelerationNBodyNetv4(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            if arch == "v5":
+                assert AccelerationNBodyNetv5 is not None, "AccelerationNBodyNetv5 non trovata in networks_2.py"
+                cls = AccelerationNBodyNetv5
+            else:
+                assert AccelerationNBodyNetv4 is not None, "AccelerationNBodyNetv4 non trovata in networks.py"
+                cls = AccelerationNBodyNetv4
+            net_ = cls(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
+            ctor_ = lambda: cls(n_obj=n_obj, num_blocks=args.n_blocks, dtype=DTYPE, device=DEVICE).to(DEVICE)
         return net_, ctor_
 
     net, net_random_ctor = build_net(args.n_obj)
@@ -561,10 +861,16 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     np.random.seed(0)
 
+    max_err = check_equivariance(net, DEVICE, DTYPE, args.n_obj)
+    if max_err >= 1e-6:
+        print("\n    Procedo comunque con i probe sottostanti, ma i risultati di [2],[5],[6],[8] "
+              "vanno considerati inaffidabili finche' il problema sopra non e' risolto.\n")
+
     report_symmetric_antisymmetric(net, net_random_ctor, args.n_obj)
     probe_linear_regression(net, DEVICE, DTYPE, args.n_obj)
     probe_intrinsic_dimension(net, DEVICE, DTYPE, args.n_obj)
     probe_neighborhood_overlap(net, DEVICE, DTYPE, args.n_obj)
+    probe_relative_angle_channels(net, DEVICE, DTYPE, args.n_obj)
 
     if args.n_obj == 2:
         probe_angle_channels(net, DEVICE, DTYPE)

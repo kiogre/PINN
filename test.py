@@ -12,12 +12,11 @@ from train import (
     generate_instance,
     compute_energy,
     compute_angular_momentum,
-    conservation_loss,
     canonicalize_translation,
     uncanonicalize_translation,
 )
 
-from networks_2 import Acceleration2BodyNetv5, Acceleration2BodyNetv6
+from networks_2 import Acceleration2BodyNetv5
 
 
 def compute_momentum(states):
@@ -28,9 +27,7 @@ def compute_momentum(states):
     return torch.stack([m1 * vx1 + m2 * vx2, m1 * vy1 + m2 * vy2], dim=1)
 
 
-# ============================================================
-# Animazione (invariata)
-# ============================================================
+# Animazione
 
 def animate_trajectory(traj_net, traj_solver, interval=30, save_path=None):
     fig, ax = plt.subplots(figsize=(7, 7))
@@ -95,9 +92,7 @@ def animate_trajectory(traj_net, traj_solver, interval=30, save_path=None):
     return anim
 
 
-# ============================================================
 # Solver di riferimento
-# ============================================================
 
 def two_body_rhs(t, state, masses, G=1.0, eps=1e-3):
     x1, y1, x2, y2 = state[0:4]
@@ -114,14 +109,7 @@ def two_body_rhs(t, state, masses, G=1.0, eps=1e-3):
 
 
 def solve_twobody(state0, masses, dt, n_points, G=1.0):
-    """Integrazione numerica del problema dei due corpi.
-
-    FIX rispetto alla versione precedente: qui i punti valutati sono ESATTAMENTE
-    agli stessi istanti t = 0, dt, 2*dt, ... dei passi della rete (t_eval costruito
-    da dt direttamente, non da un t_max diviso per n_points-1) -- prima c'era un
-    disallineamento sistematico di circa dt/(n_points-1) per punto, che si
-    accumulava lungo il confronto.
-    """
+    """Integrazione numerica del problema dei due corpi."""
     t_eval = np.arange(n_points) * dt
 
     sol = solve_ivp(
@@ -150,13 +138,13 @@ def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.01, see
         for _ in range(rollout_steps):
             traj_net.append(s_abs.squeeze(0).cpu())
             
-            # 1. Canonizziamo prima di passare alla rete
+            # Canonizziamo prima di passare alla rete
             s_canon, p_min = canonicalize_translation(s_abs)
             
-            # 2. La rete predice lo stato canonico al tempo t+1
+            # La rete predice lo stato canonico al tempo t+1
             out_canon = BodyNetwork(s_canon, dt)
             
-            # 3. Riportiamo l'output nel sistema di riferimento globale
+            # Riportiamo l'output nel sistema di riferimento globale
             s_abs = uncanonicalize_translation(out_canon, p_min)
 
     # Preparazione per il solver di riferimento (condizioni iniziali t=0)
@@ -197,9 +185,7 @@ def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.01, see
         "momentum_drift": drift_p,
     }
 
-# ============================================================
 # Errore rete-vs-solver, step per step
-# ============================================================
 
 def compute_stepwise_error(results):
     """Errore euclideo posizione/velocità, rete vs solver, per ciascun corpo, ad ogni step."""
@@ -230,10 +216,8 @@ def compute_stepwise_error(results):
     }
 
 
-# ============================================================
 # Diagnostica di DIREZIONE: la rete predice lo spostamento
 # nella direzione giusta al PRIMO step, isolato dall'accumulo?
-# ============================================================
 def direction_diagnostic(BodyNetwork, device, dt, n_samples=200, eps=1e-3, G=1.0, dtype=torch.float64):
     BodyNetwork.eval()
     angles_body1, angles_body2 = [], []
@@ -290,15 +274,12 @@ def direction_diagnostic(BodyNetwork, device, dt, n_samples=200, eps=1e-3, G=1.0
         "angles_body2": np.array(angles_body2), "ratios_body2": np.array(ratio_body2),
     }
 
-# ============================================================
-# Plot diagnostici
-# ============================================================
 
 def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
     n_steps = len(err["pos_err_body1"])
     steps = np.arange(n_steps)
 
-    # 1. Errore di posizione/velocità, rete vs solver, per step (scala log)
+    # Errore di posizione/velocità, rete vs solver, per step (scala log)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     axes[0].plot(steps, err["pos_err_body1"], label="Body 1")
     axes[0].plot(steps, err["pos_err_body2"], label="Body 2")
@@ -321,7 +302,7 @@ def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
     fig.tight_layout()
     fig.savefig(f"{save_prefix}_stepwise_error.png", dpi=150)
 
-    # 2. Drift di energia / momento angolare / momento lineare
+    # Drift di energia / momento angolare / momento lineare
     fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4.5))
     for ax, key, title in zip(
         axes2,
@@ -338,7 +319,7 @@ def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
     fig2.tight_layout()
     fig2.savefig(f"{save_prefix}_conservation_drift.png", dpi=150)
 
-    # 3. Diagnostica di direzione (istogrammi)
+    # Diagnostica di direzione (istogrammi)
     fig3, axes3 = plt.subplots(1, 2, figsize=(12, 4.5))
     axes3[0].hist(dir_diag["angles_body1"], bins=30, alpha=0.6, label="Body 1")
     axes3[0].hist(dir_diag["angles_body2"], bins=30, alpha=0.6, label="Body 2")
@@ -361,10 +342,6 @@ def plot_diagnostics(results, err, dir_diag, save_prefix="diag"):
     plt.close("all")
 
 
-# ============================================================
-# Main
-# ============================================================
-
 if __name__ == "__main__":
 
     print("=" * 90)
@@ -372,9 +349,6 @@ if __name__ == "__main__":
     PATH = "./PINN_savefile/save_equivariance_acc_v5_gpinn.pt"  # percorso aggiornato
 
     torch.manual_seed(63)
-
-    #63 ellissi
-    #fionda 420 e fa MOLTO SCHIFO
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -393,28 +367,28 @@ if __name__ == "__main__":
     weights = ckpt.get("model", ckpt)
     BodyNetwork.load_state_dict(weights)
 
-    # 1. Rollout rete vs solver (con time alignment e traslazione canonica corrette)
+    # Rollout rete vs solver (con time alignment e traslazione canonica corrette)
     results = test(BodyNetwork, device=DEVICE, rollout_steps=rollout_steps, dt=dt, dtype=dtype)
 
-    # 2. Errore stepwise
+    # Errore stepwise
     err = compute_stepwise_error(results)
     print(f"\nErrore di posizione, ultimo step: body1={err['pos_err_body1'][-1]:.4f}  "
           f"body2={err['pos_err_body2'][-1]:.4f}")
     print(f"Errore di posizione, primo step:  body1={err['pos_err_body1'][0]:.6f}  "
           f"body2={err['pos_err_body2'][0]:.6f}")
 
-    # 3. Drift di conservazione
+    # Drift di conservazione
     print(f"\nDrift energia:          max={max(results['energy_drift']):.3e}")
     print(f"Drift momento angolare: max={max(results['angular_drift']):.3e}")
     print(f"Drift momento lineare:  max={max(results['momentum_drift']):.3e}")
 
-    # 4. Diagnostica di direzione
+    # Diagnostica di direzione
     print(f"\n--- Diagnostica di direzione (single-step, {rollout_steps} campioni indipendenti) ---")
     dir_diag = direction_diagnostic(BodyNetwork, DEVICE, dt, n_samples=rollout_steps, dtype=dtype)
 
-    # 5. Plot
+    # Plot
     plot_diagnostics(results, err, dir_diag, save_prefix="diag")
     print("\nSalvati: diag_stepwise_error.png, diag_conservation_drift.png, diag_direction_check.png")
 
-    # 6. Animazione
+    # Animazione
     animate_trajectory(results["traj_net"], results["traj_solver"], interval=20)

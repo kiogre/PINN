@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from networks import AccelerationNBodyNetv4
+from networks_2 import AccelerationNBodyNetv5
 import random
 from tqdm import tqdm
 
@@ -77,11 +78,11 @@ def physics_loss_n_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net
     dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True) + eps ** 2 # [B, N, N, 1]
     dist = torch.sqrt(dist_sq)                           # [B, N, N, 1]
 
-    # 1. Target Accelerazione di Newton
+    # Target Accelerazione di Newton
     m_j = m.view(B, 1, N, 1)  # massa del corpo j
     a_target = G * torch.sum(m_j * diff / (dist ** 3), dim=2)  # [B, N, 2]
 
-    # 2. Predizione dell'accelerazione dalla rete
+    # Predizione dell'accelerazione dalla rete
     if net is not None:
         a_pred = net.predict_acceleration(input_state)   # [B, N, 2]
     else:
@@ -92,7 +93,7 @@ def physics_loss_n_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net
     # Residual loss standard
     loss_res = F.smooth_l1_loss(a_pred, a_target, beta=1e-2)
 
-    # 3. Target del Gradiente Analitico (da_i / dp_i)
+    # Target del Gradiente Analitico (da_i / dp_i)
     # Matrice identita 2x2
     I = torch.eye(2, device=input_state.device, dtype=input_state.dtype).view(1, 1, 1, 2, 2)
     diff_outer = torch.matmul(diff.unsqueeze(-1), diff.unsqueeze(-2)) # [B, N, N, 2, 2]
@@ -104,7 +105,7 @@ def physics_loss_n_body(input_state, output_state, dt=0.01, G=1.0, eps=1e-3, net
     # Derivata analitica totale di a_i rispetto a p_i
     grad_a_target_diag = -torch.sum(grad_term * mask, dim=2) # [B, N, 2, 2]
 
-    # 4. Gradiente Predetto dalla Rete via Autograd
+    # Gradiente Predetto dalla Rete via Autograd
     # Calcoliamo la derivata di ciascuna componente x, y dell'accelerazione di ogni corpo
     grad_a_pred_list = []
     for body_idx in range(N):
@@ -320,9 +321,10 @@ def train_network(DEVICE: torch.device = torch.device('cpu'), n_body: int = 3):
     g_weight = 0.1 # Peso g-PINN
     dtype = torch.float64
 
-    BodyNetwork = AccelerationNBodyNetv4(
+    BodyNetwork = AccelerationNBodyNetv5(
         n_obj=n_body,
         num_blocks=n_blocks,
+        r_dim=2,
         dtype=dtype,
         device=DEVICE
     ).to(DEVICE)
@@ -355,7 +357,7 @@ if __name__ == "__main__":
     print("=" * 90)
 
     N_BODY = 3
-    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc.pt"
+    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v5.pt"
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
