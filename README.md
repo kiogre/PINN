@@ -17,6 +17,10 @@ Another very interesting aspect is to see if the PINN for the 2-body problem is 
 - if the mass of a single body is 0 in the 2 body problem, all of the accceleration should become (0,0). Does it happen? Should we create the network such that this is always assured?
 - If the mass of a single body is 0 in the 3 body problem, it should behave exactly like the 2 body problem. Can we make it work? Should we start by multiplying the input by the mass?
 
-## First annotation of one of the questions
+## Results second question
 
 If we consider the model of the 2 body problem and we proceed to set one of the 2 masses to 0, the body that doesn't have the null mass have effectly 0 acceleration and continue with a uniform rectilinear motion. The test shows the "trajectory of the null body", with an error of position, even if it doesn't exists but it isn't the important part.
+
+# Results third question
+
+If we consider the model of the N-body problem and we proceed to set one of the masses to 0, the other **2** bodies goes out like there is no acceleration, with a uniform rectilinear motion. This is very interesting, so the mass of a single body has so much influence over the other bodies, by completing eliminating it, likely a multiplication it erases everything else. I would like to avoid this, are needed more thoughts about this aspect.

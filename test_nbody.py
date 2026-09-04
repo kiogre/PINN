@@ -4,7 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.animation import FuncAnimation
-from networks import AccelerationNBodyNetv4, AccelerationNBodyNetv5
+from networks import AccelerationNBodyNetv4
+from networks_2 import AccelerationNBodyNetv5
 import random
 from tqdm import tqdm
 from scipy.integrate import solve_ivp
@@ -296,9 +297,9 @@ if __name__ == "__main__":
     print("=" * 90)
 
     N_BODY = 3  # deve combaciare col checkpoint caricato
-    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v5.pt"
+    PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v4.pt"
 
-    torch.manual_seed(2)
+    torch.manual_seed(42)
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -307,7 +308,7 @@ if __name__ == "__main__":
     rollout_steps = 1000
     dtype = torch.float64
 
-    BodyNetwork = AccelerationNBodyNetv5(
+    BodyNetwork = AccelerationNBodyNetv4(
         n_obj=N_BODY,
         num_blocks=n_blocks,
         dtype=dtype,
