@@ -172,7 +172,7 @@ def compute_angular_momentum(states):
     return L
 
 
-def conservation_loss(initial, output, G=1.0, eps=1e-2):
+def conservation_loss(initial, output, G=1.0, eps=1e-3):
     """Penalizzazione del drift di energia e momento angolare."""
     E, E0 = compute_energy(output, G, eps), compute_energy(initial, G, eps)
     L, L0 = compute_angular_momentum(output), compute_angular_momentum(initial)
@@ -182,7 +182,7 @@ def conservation_loss(initial, output, G=1.0, eps=1e-2):
     return loss_E + loss_L
 
 
-def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
+def _run_epoch(i, BodyNetwork, optimizer, device, batch_size, dt,
                total_t_max, c_weight, dtype, n_obj, g_weight=0.1):
     optimizer.zero_grad()
 
@@ -199,7 +199,7 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
 
         # Integrazione della physics_loss_n_body in configurazione g-PINN
         p_loss = physics_loss_n_body(current_input, output, dt=dt, net=BodyNetwork, g_weight=g_weight)
-        c_loss = conservation_loss(initial, output, eps=1e-2)
+        c_loss = conservation_loss(initial, output, eps=1e-3)
 
         total += p_loss + c_weight * c_loss
         p_total += p_loss
@@ -218,7 +218,7 @@ def _run_epoch(i, BodyNetwork, optimizer, scheduler, device, batch_size, dt,
     total.backward()
     torch.nn.utils.clip_grad_norm_(BodyNetwork.parameters(), max_norm=1.0)
     optimizer.step()
-    scheduler.step(total.item())
+    # removed scheduler.step(total.item())
 
     return total.item(), p_total.item(), c_total.item()
 
@@ -241,7 +241,7 @@ def train(epochs_pretrain: int,
     for i in pbar:
         total_t_max = min(5, 1 + i // 200)
 
-        result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
+        result = _run_epoch(i, BodyNetwork, optimizer, device,
                              batch_size, dt, total_t_max, c_weight=0.0, dtype=dtype, n_obj=n_obj, g_weight=g_weight)
         if result is None:
             continue
@@ -263,10 +263,12 @@ def train(epochs_pretrain: int,
         total_t_max = min(max_horizon, 1 + i // ramp_denom)
         c_weight = min(i / 100, 1) / 2
 
-        result = _run_epoch(i, BodyNetwork, optimizer, scheduler, device,
+        result = _run_epoch(i, BodyNetwork, optimizer, device,
                              batch_size, dt, total_t_max, c_weight=c_weight, dtype=dtype, n_obj=n_obj, g_weight=g_weight)
         if result is None:
             continue
+
+        scheduler.step()
 
         total, p_loss_val, c_loss_val = result
         loss_history.append(total)
@@ -331,8 +333,10 @@ def train_network(DEVICE: torch.device = torch.device('cpu'), n_body: int = 3):
 
     optimizer = torch.optim.Adam(BodyNetwork.parameters(), lr=lr)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-6
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs_main,
+        eta_min=1e-6
     )
 
     losses, p_losses, c_losses = train(

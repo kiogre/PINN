@@ -165,7 +165,7 @@ class Acceleration2BodyNetv5(nn.Module):
 
         vecs = torch.stack([p, v], dim=2)  # [B, 2, 2, 2]
 
-        eps = 1e-4
+        eps = 1e-3
 
         r_ij = 1.0 / (torch.sum((p[:, 0] - p[:, 1])**2, dim=-1, keepdim=True) + eps) 
 
@@ -249,7 +249,7 @@ class AccelerationNBodyNetv5(nn.Module):
         self.gates_inv = nn.ModuleList(gates_inv)
         self.gates_rot = nn.ModuleList(gates_rot)
 
-    def _compute_r_features(self, p: torch.Tensor, m: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    def _compute_r_features(self, p: torch.Tensor, m: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
         """
         Calcola feature scalari invarianti SO(2) e permutazione-invarianti sugli altri corpi.
         Restituisce un tensore [B, N, 2] con l'intensità locale gravitazionale (1/r^2 e 1/r^3 pesati su m_j).
