@@ -127,6 +127,26 @@ def test(BodyNetwork, n_obj, device=torch.device("cpu"), rollout_steps=30, dt=0.
     BodyNetwork.eval()
 
     state = seed_state if seed_state is not None else generate_instance(1, n_obj, device, dtype=dtype)
+    # known problem 1
+    # state = torch.tensor([[
+    #     3.0, 1.0, 3.0, 0.0, 0.0,
+    #     4.0, -2.0, -1.0, 0.0, 0.0,
+    #     5.0, 1.0, -1.0, 0.0, 0.0
+    # ]], dtype=torch.float64)
+
+    # known problem 2
+    # state = torch.tensor([[
+    #     1.0, 1.0, 0.0, 0.0, np.sqrt(1/np.sqrt(3)),
+    #     1.0, -0.5, np.sqrt(3)/2, -np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3)),
+    #     1.0, -0.5, -np.sqrt(3)/2, np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3))
+    # ]], dtype=torch.float64)
+
+    # known problem 3
+    state = torch.tensor([[
+        1.0, 0.0, 0.0, -0.93240737, -0.86473146,
+        1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
+        1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
+    ]], dtype=torch.float64)
 
     traj_net = []
     with torch.no_grad():
@@ -299,7 +319,7 @@ if __name__ == "__main__":
     N_BODY = 3  # deve combaciare col checkpoint caricato
     PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v4.pt"
 
-    torch.manual_seed(42)
+    torch.manual_seed(63)
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
