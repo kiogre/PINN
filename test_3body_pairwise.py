@@ -148,6 +148,26 @@ def test_pairwise_model(ModelWrapper, n_obj=3, device=torch.device("cpu"), rollo
 
     # Generiamo un'istanza iniziale standard a N corpi
     state = generate_instance(1, n_obj, device, dtype=dtype)
+    # known problem 1
+    # state = torch.tensor([[
+    #     3.0, 1.0, 3.0, 0.0, 0.0,
+    #     4.0, -2.0, -1.0, 0.0, 0.0,
+    #     5.0, 1.0, -1.0, 0.0, 0.0
+    # ]], dtype=torch.float64)
+
+    # known problem 2
+    # state = torch.tensor([[
+    #     1.0, 1.0, 0.0, 0.0, np.sqrt(1/np.sqrt(3)),
+    #     1.0, -0.5, np.sqrt(3)/2, -np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3)),
+    #     1.0, -0.5, -np.sqrt(3)/2, np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3))
+    # ]], dtype=torch.float64)
+
+    # known problem 3
+    state = torch.tensor([[
+        1.0, 0.0, 0.0, -0.93240737, -0.86473146,
+        1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
+        1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
+    ]], dtype=torch.float64)
 
     traj_net = []
     with torch.no_grad():
