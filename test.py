@@ -132,6 +132,11 @@ def test(BodyNetwork, device=torch.device("cpu"), rollout_steps=30, dt=0.01, see
     # Stato iniziale (già canonizzato da generate_instance)
     state = seed_state if seed_state is not None else generate_instance(batch_size=1, device=device, dtype=dtype)
 
+    state = torch.tensor([[
+    1.0,  0.97000436, -0.24308753,  0.46620369,  0.43236573,
+    1.0, -0.97000436,  0.24308753,  0.46620369,  0.43236573
+]], dtype=torch.float64, device = device)
+
     traj_net = []
     with torch.no_grad():
         s_abs = state.clone() # Mantiene lo stato assoluto nel riferimento globale
@@ -391,4 +396,4 @@ if __name__ == "__main__":
     print("\nSalvati: diag_stepwise_error.png, diag_conservation_drift.png, diag_direction_check.png")
 
     # Animazione
-    animate_trajectory(results["traj_net"], results["traj_solver"], interval=20)
+    animate_trajectory(results["traj_net"], results["traj_solver"], interval=20, save_path = "./2_body_video.mp4")

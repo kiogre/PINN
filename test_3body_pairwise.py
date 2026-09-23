@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -67,8 +68,10 @@ class PairwiseWrapperNBody(nn.Module):
                     m[:, j], p[:, j], v[:, j]
                 ], dim=-1)  # [B, 10]
 
+                state_pair_canon, _ = canonicalize_translation(state_pair)
+
                 # Prediciamo l'accelerazione usando la rete a 2 corpi
-                a_pair = self.net_2body.predict_acceleration(state_pair)  # [B, 2, 2]
+                a_pair = self.net_2body.predict_acceleration(state_pair_canon)  # [B, 2, 2]
 
                 # Accumuliamo i contributi vettoriali rispettivi
                 a_total[:, i] += a_pair[:, 0]
@@ -149,25 +152,27 @@ def test_pairwise_model(ModelWrapper, n_obj=3, device=torch.device("cpu"), rollo
     # Generiamo un'istanza iniziale standard a N corpi
     state = generate_instance(1, n_obj, device, dtype=dtype)
     # known problem 1
-    # state = torch.tensor([[
+    # special_state = torch.tensor([[
     #     3.0, 1.0, 3.0, 0.0, 0.0,
     #     4.0, -2.0, -1.0, 0.0, 0.0,
     #     5.0, 1.0, -1.0, 0.0, 0.0
     # ]], dtype=torch.float64)
 
     # known problem 2
-    # state = torch.tensor([[
-    #     1.0, 1.0, 0.0, 0.0, np.sqrt(1/np.sqrt(3)),
-    #     1.0, -0.5, np.sqrt(3)/2, -np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3)),
-    #     1.0, -0.5, -np.sqrt(3)/2, np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3))
+    # special_state = torch.tensor([[
+    #     2.25, 2.25, 0.0, 0.0, np.sqrt(1/np.sqrt(3)),
+    #     2.25, -0.5*2.25, np.sqrt(3)/2*2.25, -np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)) * np.sqrt(2.25), -0.5 * np.sqrt(1/np.sqrt(3)) * np.sqrt(2.25),
+    #     2.25, -0.5*2.25, -np.sqrt(3)/2*2.25, np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)) * np.sqrt(2.25), -0.5 * np.sqrt(1/np.sqrt(3)) * np.sqrt(2.25)
     # ]], dtype=torch.float64)
 
     # known problem 3
-    state = torch.tensor([[
-        1.0, 0.0, 0.0, -0.93240737, -0.86473146,
-        1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
-        1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
-    ]], dtype=torch.float64)
+    # special_state = torch.tensor([[
+    #     2.25,  0.0,        0.0,        -0.93240737 * np.sqrt(2.25), -0.86473146 * np.sqrt(2.25),
+    #     2.25,  0.97000436 * 2.25, -0.24308753 * 2.25,  0.46620369* * np.sqrt(2.25),  0.43236573 * np.sqrt(2.25),
+    #     2.25, -0.97000436 * 2.25,  0.24308753 * 2.25,  0.46620369 * np.sqrt(2.25),  0.43236573 * np.sqrt(2.25),
+    # ]], dtype=torch.float64)
+
+    state = state.to(device)
 
     traj_net = []
     with torch.no_grad():
@@ -297,9 +302,9 @@ if __name__ == "__main__":
     print("=" * 90)
 
     # Percorso del checkpoint del modello a 2 corpi già addestrato
-    PATH_2BODY = "./PINN_savefile/save_equivariance_acc_v4.pt"  # Sostituisci se usi v5 o g-PINN
+    PATH_2BODY = "./PINN_savefile/save_equivariance_acc_v4_gpinn.pt"  # Sostituisci se usi v5 o g-PINN
 
-    torch.manual_seed(63)
+    torch.manual_seed(42)
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_blocks = 4
@@ -337,5 +342,12 @@ if __name__ == "__main__":
     print(f"Drift momento angolare: max={max(results['angular_drift']):.3e}")
     print(f"Drift momento lineare:  max={max(results['momentum_drift']):.3e}")
 
+    state = torch.tensor([[
+        1.0, 0.0, 0.0, -0.93240737, -0.86473146,
+        1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
+        1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
+    ]], dtype=torch.float64).to(DEVICE)
+
+
     # 5. Visualizzazione grafica e animazione della traiettoria
-    animate_trajectory(results["traj_net"], results["traj_solver"], n_body, interval=20)
+    animate_trajectory(results["traj_net"], results["traj_solver"], n_body, interval=20, save_path="./3_body_from_2.mp4")

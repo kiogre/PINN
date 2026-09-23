@@ -132,21 +132,21 @@ def test(BodyNetwork, n_obj, device=torch.device("cpu"), rollout_steps=30, dt=0.
     #     3.0, 1.0, 3.0, 0.0, 0.0,
     #     4.0, -2.0, -1.0, 0.0, 0.0,
     #     5.0, 1.0, -1.0, 0.0, 0.0
-    # ]], dtype=torch.float64)
+    # ]], dtype=torch.float64, device=device)
 
     # known problem 2
     # state = torch.tensor([[
     #     1.0, 1.0, 0.0, 0.0, np.sqrt(1/np.sqrt(3)),
     #     1.0, -0.5, np.sqrt(3)/2, -np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3)),
     #     1.0, -0.5, -np.sqrt(3)/2, np.sqrt(3)/2 * np.sqrt(1/np.sqrt(3)), -0.5 * np.sqrt(1/np.sqrt(3))
-    # ]], dtype=torch.float64)
+    # ]], dtype=torch.float64, device=device)
 
     # known problem 3
-    state = torch.tensor([[
-        1.0, 0.0, 0.0, -0.93240737, -0.86473146,
-        1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
-        1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
-    ]], dtype=torch.float64)
+    # state = torch.tensor([[
+    #     1.0, 0.0, 0.0, -0.93240737, -0.86473146,
+    #     1.0, 0.97000436, -0.24308753, 0.46620369, 0.43236573,
+    #     1.0, -0.97000436, 0.24308753, 0.46620369, 0.43236573,
+    # ]], dtype=torch.float64, device=device)
 
     traj_net = []
     with torch.no_grad():
@@ -319,13 +319,13 @@ if __name__ == "__main__":
     N_BODY = 3  # deve combaciare col checkpoint caricato
     PATH = f"./PINN_savefile/save_nbody_{N_BODY}_gpinn_acc_v4.pt"
 
-    torch.manual_seed(63)
+    torch.manual_seed(42)
 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_blocks = 4
     dt = 0.01
-    rollout_steps = 1000
+    rollout_steps = 500
     dtype = torch.float64
 
     BodyNetwork = AccelerationNBodyNetv4(
@@ -355,4 +355,4 @@ if __name__ == "__main__":
     plot_diagnostics(results, err, dir_diag, save_prefix="diag_nbody")
     print("\nSalvati: diag_nbody_stepwise_error.png, diag_nbody_conservation_drift.png, diag_nbody_direction_check.png")
 
-    animate_trajectory(results["traj_net"], results["traj_solver"], N_BODY, interval=20)
+    animate_trajectory(results["traj_net"], results["traj_solver"], N_BODY, interval=20, save_path="./3_body_video.mp4")
