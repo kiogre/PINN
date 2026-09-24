@@ -17,6 +17,7 @@ Uso:
 
 import argparse
 from collections import defaultdict
+from sklearn.decomposition import PCA
 
 import numpy as np
 import torch
@@ -235,10 +236,7 @@ def two_nn_id(X, discard_fraction=0.1):
 # ------------------------------------------------------------------
 # Neighborhood Overlap (versione semplice, continua)
 # ------------------------------------------------------------------
-def neighborhood_overlap(feats, target, k=15):
-    """Frazione media di vicini condivisi tra lo spazio delle feature
-    e una grandezza scalare target (energia, |L|, e, ...).
-    """
+def neighborhood_overlap(feats, target, k=15, n_components = 10):
     n = feats.shape[0]
     tree_f = cKDTree(feats)
     _, idx_f = tree_f.query(feats, k=k + 1)
@@ -283,18 +281,15 @@ def probe_intrinsic_dimension_gates(thetas, lambdas):
 
 
 def probe_linear_vs_actions(thetas, lambdas, elems):
-    """Regressione lineare: gate -> variabili angolo-azione.
-    Mostra quanto informazione sulle quantita' conservate
-    (e sull'angolo) e' linearmente leggibile dai gate.
-    """
     print("\n[2] Probing lineare: gate -> variabili angolo-azione")
 
     targets = {
         "energia": elems["energy"].cpu().numpy(),
         "|L|": elems["h"].abs().cpu().numpy(),
         "eccentricita'": elems["e"].cpu().numpy(),
-        "anomalia_vera": elems["nu"].cpu().numpy(),
+        # "anomalia_vera" tolta da qui, gestita a parte perché circolare
     }
+    nu_xy = elems["nu_xy"].cpu().numpy()   # [B, 2] = (cos nu, sin nu)
 
     n_layers = len(thetas)
     n_train = int(0.8 * len(elems["energy"]))
@@ -317,6 +312,17 @@ def probe_linear_vs_actions(thetas, lambdas, elems):
                 ss_tot = np.sum((y_te - y_te.mean()) ** 2)
                 r2 = 1.0 - ss_res / (ss_tot + 1e-12)
                 r2s.append(f"{tname}: R²={r2:.3f}")
+
+            # --- caso speciale: anomalia vera (circolare) ---
+            y_tr_xy, y_te_xy = nu_xy[:n_train], nu_xy[n_train:]
+            coef_xy, *_ = np.linalg.lstsq(X_tr, y_tr_xy, rcond=None)   # [n_feat, 2]
+            pred_xy = X_te @ coef_xy
+            nu_pred = np.arctan2(pred_xy[:, 1], pred_xy[:, 0])
+            nu_true = np.arctan2(y_te_xy[:, 1], y_te_xy[:, 0])
+            ang_err = np.arctan2(np.sin(nu_pred - nu_true), np.cos(nu_pred - nu_true))
+            r2_circ = 1.0 - np.mean(ang_err ** 2) / (np.var(nu_true) + 1e-12)
+            r2s.append(f"anomalia_vera: R²circ={r2_circ:.3f}")
+
             print(f"    {name:6s}  " + "  ".join(r2s))
 
 
@@ -332,7 +338,7 @@ def probe_neighborhood_overlap_gates(thetas, lambdas, elems, k=15):
         "energia": elems["energy"].cpu().numpy(),
         "|L|": elems["h"].abs().cpu().numpy(),
         "eccentricita'": elems["e"].cpu().numpy(),
-        "anomalia_vera": elems["nu"].cpu().numpy(),
+        "anomalia_vera": elems["nu_xy"].cpu().numpy()
     }
 
     n_layers = len(thetas)
@@ -350,31 +356,32 @@ def probe_neighborhood_overlap_gates(thetas, lambdas, elems, k=15):
 
 
 def probe_theta_vs_true_anomaly(thetas, elems, n_traj_plot=6):
-    """Controllo diretto: esiste un canale di theta che segue
-    l'anomalia vera (o un multiplo/offset costante)?
-    Utile per capire se il RotationGate ha imparato la fase orbitale.
-    """
     print("\n[4] Correlazione theta vs anomalia vera (punto per punto)")
 
-    nu = elems["nu"].cpu().numpy()          # [B]
+    nu = elems["nu"].cpu().numpy()
     n_layers = len(thetas)
 
     best_overall = None
     for li in range(n_layers):
-        th = thetas[li]                     # [B, 2, C]
+        th = thetas[li]
         if th is None:
             continue
         th_np = th.cpu().numpy()
         B, Nbody, C = th_np.shape
         for c in range(C):
-            # usiamo la media sui due corpi (simmetria) oppure corpo 0
-            theta_c = th_np[:, 0, c]        # [B]
-            # allineiamo di un offset costante (fase globale arbitraria)
-            # minimizzando la varianza della differenza
-            diff = np.unwrap(theta_c) - np.unwrap(nu)
-            offset = np.mean(diff)
+            theta_c = th_np[:, 0, c]
+
+            # differenza circolare punto per punto, NIENTE unwrap cumulativo
+            diff = theta_c - nu
+            diff = np.arctan2(np.sin(diff), np.cos(diff))   # wrap in (-pi, pi]
+
+            # offset costante = media circolare della differenza
+            offset = np.arctan2(np.mean(np.sin(diff)), np.mean(np.cos(diff)))
+
             resid = diff - offset
+            resid = np.arctan2(np.sin(resid), np.cos(resid))  # ri-wrappa il residuo
             std = np.std(resid)
+
             if best_overall is None or std < best_overall[0]:
                 best_overall = (std, li, c, offset)
 
@@ -451,6 +458,7 @@ def main():
     thetas, lambdas = extract_gate_outputs(net, states, arch=args.arch)
 
     # Probe
+    elems["nu_xy"] = torch.stack([torch.cos(elems["nu"]), torch.sin(elems["nu"])], dim=-1)
     probe_intrinsic_dimension_gates(thetas, lambdas)
     probe_linear_vs_actions(thetas, lambdas, elems)
     probe_neighborhood_overlap_gates(thetas, lambdas, elems, k=15)
